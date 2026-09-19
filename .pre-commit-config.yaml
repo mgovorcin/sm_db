@@ -8,7 +8,7 @@ default_install_hook_types: [pre-commit, pre-push]
 # Generated artifacts: the catalog, the frame database and the rendered map are
 # written by the scheduled job, not hand-edited, and the viewer is mostly an
 # embedded HTML/JS template.
-exclude: ^(catalog/|docs/frame-viewer\.html$|orbits/)
+exclude: ^(catalog/|docs/|orbits/)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

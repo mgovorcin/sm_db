@@ -1,37 +1,49 @@
-name: Update stripmap catalog
+name: Update stripmap archive
 
-# Keeps the committed stripmap archive current: queries ASF for acquisitions
-# since the catalog's last date, downloads the orbits the new ones need,
-# rebuilds the frame database and re-renders the map.
+# Weekly refresh of the stripmap archive and the map published from it.
 #
-# Everything comes from public sources -- the ASF search API and the public
-# s1-orbits bucket -- so no credentials are needed.
+# Nothing generated is committed. A frame database, a GeoJSON and a 4.7 MB page
+# come to ~18 MB a run; committing that weekly is ~0.9 GB of git history a year
+# and daily is ~6.6 GB, which is how a repository becomes unusable. Instead the
+# state is carried in a release asset, replaced each run, and the page is
+# deployed straight to Pages from a build artifact. Git history stays flat.
+#
+# The run is incremental for the same reason: re-deriving every frame would need
+# every orbit file ever used -- 24 GB for a twelve-year archive, more than the
+# 10 GB an Actions cache can hold. A frame's grid is frozen once defined, so only
+# new acquisitions are processed and only their orbits are fetched.
+#
+# Everything comes from public sources: the ASF search API and the public
+# s1-orbits bucket. No credentials.
 
 on:
   schedule:
-    # Every day at 02:00 UTC. Precise orbits lag an acquisition by ~20 days, so
-    # a daily run mostly picks up frames for scenes acquired a few weeks ago;
-    # that is expected, and the catalog holds the granules meanwhile.
-    - cron: '0 2 * * *'
+    # Mondays at 02:00 UTC. Precise orbits lag an acquisition by ~20 days, so a
+    # weekly run mostly picks up scenes acquired a few weeks ago; that is
+    # expected, and the catalog holds the granules meanwhile.
+    - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
-      start:
-        description: 'Query from this date instead of continuing the catalog'
-        required: false
-      beams:
-        description: 'Space-separated beams to limit to, e.g. "S3 S6"'
-        required: false
+      rebuild:
+        description: 'Re-derive every frame (slow; needed after a tiling change)'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: write      # replace the release asset
+  pages: write         # publish the map
+  id-token: write      # required by deploy-pages
 
 concurrency:
-  group: update-catalog
+  group: update-archive
   cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
 
@@ -45,8 +57,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[update]'
 
-      # Orbit files are large and re-fetching them every run would be slow and
-      # rude to the source, so they are cached rather than committed.
+      # The archive so far, from the last run. A fresh repository simply starts
+      # empty and builds from nothing.
+      - name: Fetch previous archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p catalog
+          gh release download archive --dir catalog --clobber \
+            --pattern 'sm_frames.sqlite3' --pattern 'sm_granules.json.gz' \
+            || echo "No previous archive; starting from scratch."
+          ls -lh catalog || true
+
+      # Only the orbits for new acquisitions are needed, so this stays small.
+      # A full rebuild would need far more than the cache can hold, which is why
+      # --rebuild is a manual choice rather than the default.
       - name: Restore orbit cache
         uses: actions/cache@v4
         with:
@@ -54,32 +79,41 @@ jobs:
           key: orbits-${{ github.run_id }}
           restore-keys: orbits-
 
-      - name: Update catalog, database and map
+      - name: Update archive
         run: |
-          EXTRA=""
-          if [ -n "${{ github.event.inputs.start }}" ]; then
-            EXTRA="$EXTRA --start ${{ github.event.inputs.start }}"
-          fi
-          for beam in ${{ github.event.inputs.beams }}; do
-            EXTRA="$EXTRA --beam $beam"
-          done
-          sm-db update $EXTRA
+          sm-db update \
+            --catalog catalog/sm_granules.json.gz \
+            --orbit-dir orbits \
+            -o catalog/sm_frames.sqlite3 \
+            --geojson catalog/sm_frames.geojson \
+            --viewer docs/index.html \
+            ${{ inputs.rebuild && '--rebuild' || '' }}
 
       - name: Verify the database still describes the data
         run: |
           sm-db check \
-            --catalog catalog/sm_granules.json \
+            --catalog catalog/sm_granules.json.gz \
             --orbit-dir orbits \
             -d catalog/sm_frames.sqlite3
 
-      - name: Commit
+      # Replaced in place, so the repository carries one copy rather than one per
+      # run. Release assets do not enter git history.
+      - name: Publish the archive as a release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name 'github-actions'
-          git config user.email 'github-actions@github.com'
-          if [[ -n $(git status -s catalog docs) ]]; then
-            git add catalog docs/frame-viewer.html
-            git commit -m "Update stripmap catalog [skip ci]"
-            git push
-          else
-            echo "No changes to commit"
-          fi
+          gh release view archive >/dev/null 2>&1 || \
+            gh release create archive --title "Stripmap archive" --notes \
+              "Rolling frame database and granule catalog, replaced by each scheduled run."
+          gh release upload archive \
+            catalog/sm_frames.sqlite3 \
+            catalog/sm_granules.json.gz \
+            catalog/sm_frames.geojson \
+            --clobber
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4

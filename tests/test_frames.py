@@ -375,3 +375,41 @@ class TestNodeCrossingEdgeCase:
         )
         for frame in frames_for_granule(crossing, orbit):
             assert frame.track == granule.track  # nothing attributed past the node
+
+
+class TestBboxOverride:
+    def test_edited_bbox_wins_over_the_orbit(self, granule, orbit):
+        """A GIS edit says where a frame is, not how to derive it."""
+        target = sorted(f.frame_id for f in frames_for_granule(granule, orbit))[0]
+        wanted = [100_000, 200_000, 180_000, 260_000]
+        frames = frames_for_granule(
+            granule, orbit, overrides={target: {"bbox": wanted, "epsg": 32604}}
+        )
+        got = {f.frame_id: f for f in frames}[target]
+        assert list(got.bbox) == wanted
+        assert got.epsg == 32604
+
+    def test_polygon_follows_the_edited_box(self, granule, orbit):
+        target = sorted(f.frame_id for f in frames_for_granule(granule, orbit))[0]
+        frames = frames_for_granule(
+            granule,
+            orbit,
+            overrides={
+                target: {"bbox": [100_000, 200_000, 180_000, 260_000], "epsg": 32604}
+            },
+        )
+        got = {f.frame_id: f for f in frames}[target]
+        assert got.fill_pct == 100.0
+        assert len(got.polygon.exterior.coords) == 5
+
+    def test_other_frames_are_untouched(self, granule, orbit):
+        base = {f.frame_id: f for f in frames_for_granule(granule, orbit)}
+        target = sorted(base)[0]
+        frames = frames_for_granule(
+            granule,
+            orbit,
+            overrides={target: {"bbox": [1, 2, 3, 4], "epsg": 32604}},
+        )
+        for f in frames:
+            if f.frame_id != target:
+                assert f.bbox == base[f.frame_id].bbox

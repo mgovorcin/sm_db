@@ -1,9 +1,12 @@
 # Orbit files are large and re-fetchable; the scheduled job caches them instead.
 orbits/
 
-# The catalog is committed gzipped (see save_catalog); the plain form is a
-# 13 MB working copy that would bloat the history on every daily run.
-catalog/*.json
+# Generated artifacts are never committed: ~18 MB a run becomes gigabytes of
+# git history within a year. The scheduled job publishes the database as a
+# release asset and the map straight to Pages. See update_sm_archive.yml.
+catalog/
+docs/index.html
+exports/
 
 __pycache__/
 *.py[cod]

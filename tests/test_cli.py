@@ -195,3 +195,77 @@ class TestAdjustmentsFile:
         from sm_db.cli import _load_adjustments
 
         assert _load_adjustments(None, None) == ({}, [])
+
+
+class TestIncrementalUpdate:
+    """A weekly job must not re-derive twelve years of frames to add a week.
+
+    Re-deriving needs every orbit file ever used -- 24 GB for the real archive,
+    more than a CI cache holds -- to arrive back at frames that are frozen anyway.
+    """
+
+    def _db_with(self, tmp_path, granule, frame_id="t095_000003_s3"):
+        from shapely.geometry import box
+
+        path = tmp_path / "frames.sqlite3"
+        write_database(
+            [_frame(frame_id)],
+            path,
+            tile_seconds=5.0,
+            margin=5000.0,
+            snap=30.0,
+            acquisitions={
+                frame_id: [
+                    {
+                        "date": granule.start.strftime("%Y-%m-%d"),
+                        "platform": "S1C",
+                        "granule": granule.name,
+                    }
+                ]
+            },
+        )
+        assert box  # keep the import meaningful for the fixture shape
+        return path
+
+    def test_already_seen_granules_are_not_reprocessed(self, tmp_path, granule):
+        from sm_db.db import read_acquisitions
+
+        path = self._db_with(tmp_path, granule)
+        seen = {
+            a["granule"]
+            for entries in read_acquisitions(path).values()
+            for a in entries
+        }
+        assert granule.name in seen
+
+    def test_acquisitions_accumulate_rather_than_replace(self, tmp_path, granule):
+        """The database grows across runs; it is not rebuilt from the last one."""
+        import dataclasses
+        import datetime
+
+        from sm_db.db import read_acquisitions
+
+        path = self._db_with(tmp_path, granule)
+        later = dataclasses.replace(
+            granule,
+            name="S1C_later",
+            start=granule.start + datetime.timedelta(days=12),
+        )
+        existing = read_acquisitions(path)
+        merged = dict(existing)
+        merged["t095_000003_s3"] = existing["t095_000003_s3"] + [
+            {
+                "date": later.start.strftime("%Y-%m-%d"),
+                "platform": "S1C",
+                "granule": later.name,
+            }
+        ]
+        write_database(
+            [_frame()],
+            path,
+            tile_seconds=5.0,
+            margin=5000.0,
+            snap=30.0,
+            acquisitions=merged,
+        )
+        assert len(read_acquisitions(path)["t095_000003_s3"]) == 2

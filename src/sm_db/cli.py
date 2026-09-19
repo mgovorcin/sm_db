@@ -518,7 +518,7 @@ def main() -> None:
 @click.option(
     "--viewer",
     type=click.Path(path_type=Path),
-    default="docs/frame-viewer.html",
+    default="docs/index.html",
     show_default=True,
     help="Map of the archive.",
 )
@@ -593,6 +593,13 @@ def main() -> None:
     is_flag=True,
     help="Do not fetch missing orbits; skip granules that have none.",
 )
+@click.option(
+    "--rebuild",
+    is_flag=True,
+    help="Re-derive every frame instead of only the new acquisitions. Needed after "
+    "a change to the tiling or the geometry; otherwise slow and unnecessary, since "
+    "a frame's grid is frozen once defined.",
+)
 def update(
     catalog: Path,
     orbit_dir: Path,
@@ -614,6 +621,7 @@ def update(
     merge_file: Path | None,
     min_fill: float,
     no_download: bool,
+    rebuild: bool,
 ) -> None:
     """Extend the catalog with new acquisitions and rebuild the database and map.
 
@@ -664,19 +672,38 @@ def update(
         click.echo("Nothing in the catalog yet; stopping before the rebuild.")
         return
 
-    if not no_download:
+    # A frame's grid is frozen once defined, so re-deriving the whole archive every
+    # run is wasted work: it would need every orbit file ever used -- 24 GB for a
+    # twelve-year archive, more than a CI cache can hold -- to arrive back at the
+    # same frames. Only the acquisitions this run has not seen are processed.
+    existing = (
+        {f.frame_id: f for f in db_mod.read_frames(output)} if output.exists() else {}
+    )
+    known_acq = db_mod.read_acquisitions(output) if output.exists() else {}
+    seen = {a["granule"] for entries in known_acq.values() for a in entries}
+
+    pending = everything if rebuild else [g for g in everything if g.name not in seen]
+    if existing and not rebuild:
+        click.echo(
+            f"{len(existing)} frames already defined; "
+            f"{len(pending)} acquisition(s) to add"
+        )
+    if rebuild:
+        existing, known_acq = {}, {}
+
+    if not no_download and pending:
         from sm_db.orbits import ensure_orbits
 
-        fetched = ensure_orbits(everything, orbit_dir)
+        fetched = ensure_orbits(pending, orbit_dir)
         if fetched:
             click.echo(f"Downloaded {len(fetched)} orbit file(s)")
 
     orbits = OrbitLookup(orbit_dir)
-    defined: dict[str, Frame] = {}
+    defined: dict[str, Frame] = dict(existing)
     covered: list[tuple] = []
     skipped = 0
 
-    with click.progressbar(everything, label="Defining frames") as bar:
+    with click.progressbar(pending, label="Defining frames") as bar:
         for granule in bar:
             try:
                 orbit = orbits.find(granule)
@@ -702,7 +729,12 @@ def update(
     if skipped:
         click.echo(f"  skipped {skipped} granule(s) with no orbit available", err=True)
 
-    observed = frame_acquisitions(covered)
+    # Fold this run's acquisitions into what the database already recorded.
+    observed = dict(known_acq)
+    for frame_id, entries in frame_acquisitions(covered).items():
+        merged = observed.get(frame_id, []) + entries
+        observed[frame_id] = sorted(merged, key=lambda a: (a["date"], a["granule"]))
+
     n = db_mod.write_database(
         defined.values(),
         output,
