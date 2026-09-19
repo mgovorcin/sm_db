@@ -12,7 +12,7 @@ import click
 from sm_db import db as db_mod
 from sm_db import granules as granules_mod
 from sm_db.frames import Frame, OrbitLookup, frames_for_granule, merge_frames
-from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP
+from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP, snap_bbox
 from sm_db.granules import SM_BEAM_MODES
 from sm_db.tiling import DEFAULT_TILE_SECONDS, parse_frame_id
 
@@ -240,6 +240,36 @@ def build(
     if geojson:
         _write_geojson(defined.values(), geojson)
         click.echo(f"Wrote {geojson}")
+
+
+def _build_parameters(database: Path) -> tuple[float, float]:
+    """Return the margin and snap a database was built with.
+
+    An edited frame has to be pinned the way every other frame was, so the
+    padding and lattice come from the database rather than from defaults.
+
+    Parameters
+    ----------
+    database :
+        Database file.
+
+    Returns
+    -------
+    tuple
+        ``(margin, snap)`` in metres.
+    """
+    import sqlite3
+
+    with sqlite3.connect(database) as con:
+        rows = dict(
+            con.execute(
+                "SELECT key, value FROM metadata WHERE key IN ('margin', 'snap')"
+            ).fetchall()
+        )
+    return (
+        float(json.loads(rows.get("margin", str(DEFAULT_MARGIN)))),
+        float(json.loads(rows.get("snap", str(DEFAULT_SNAP)))),
+    )
 
 
 def _load_adjustments(
@@ -775,3 +805,244 @@ def viewer_cmd(
 
     write_viewer(frames, output, acquisitions=acquisitions, tile_seconds=tile_seconds)
     click.echo(f"Wrote {output}")
+
+
+@cli.command()
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    default="sm_frames.shp",
+    show_default=True,
+    help="File to write. The extension picks the format: .shp, .gpkg, .geojson.",
+)
+@click.option(
+    "--grids",
+    is_flag=True,
+    help="Write the pinned bounding boxes instead of the frame footprints.",
+)
+@_DB_OPTION
+def export(output: Path, grids: bool, database: Path) -> None:
+    """Write frames to a GIS file, for editing and handing back.
+
+    Shapefile attribute names are capped at ten characters, so they are
+    abbreviated on the way out and understood again by ``import-shapes``.
+    Prefer GeoPackage when the choice is yours: it keeps full names and one file.
+    """
+    import geopandas as gpd
+
+    from sm_db.viewer import grids_to_geojson
+
+    frames = db_mod.read_frames(database)
+    if not frames:
+        raise click.ClickException(f"{database} holds no frames")
+
+    if grids:
+        shapes = [
+            __import__("shapely.geometry", fromlist=["shape"]).shape(f["geometry"])
+            for f in grids_to_geojson(frames)["features"]
+        ]
+    else:
+        shapes = [f.polygon for f in frames]
+
+    frame = gpd.GeoDataFrame(
+        {
+            "frame_id": [f.frame_id for f in frames],
+            "track": [f.track for f in frames],
+            "frame_idx": [f.index for f in frames],
+            "beam": [f.beam for f in frames],
+            "epsg": [f.epsg for f in frames],
+            "xmin": [f.xmin for f in frames],
+            "ymin": [f.ymin for f in frames],
+            "xmax": [f.xmax for f in frames],
+            "ymax": [f.ymax for f in frames],
+            "fill_pct": [f.fill_pct for f in frames],
+            "shift_s": [f.shift for f in frames],
+            "overlap_s": [f.overlap for f in frames],
+            "inset_m": [f.inset for f in frames],
+        },
+        geometry=shapes,
+        crs="EPSG:4326",
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_file(output)
+    click.echo(f"Wrote {len(frame)} {'grids' if grids else 'frames'} to {output}")
+
+
+@cli.command("import-shapes")
+@click.argument("shapes", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    default="sm_frame_adjustments.json",
+    show_default=True,
+    help="Adjustments file to write, for --overrides on a rebuild.",
+)
+@_DB_OPTION
+def import_shapes(shapes: Path, output: Path, database: Path) -> None:
+    """Turn an edited GIS file back into per-frame bounds.
+
+    An edited polygon is taken at face value: its bounding box in the frame's own
+    projection becomes that frame's pinned grid, replacing what the orbit would
+    have produced. Frames whose geometry is unchanged are left out, so the file
+    only carries what was actually moved.
+    """
+    import geopandas as gpd
+    from pyproj import Transformer
+    from shapely.ops import transform
+
+    def to_map(polygon, epsg):
+        tf = Transformer.from_crs(4326, epsg, always_xy=True)
+        return transform(lambda x, y: tf.transform(x, y), polygon)
+
+    edited = gpd.read_file(shapes)
+    if "frame_id" not in edited.columns:
+        raise click.ClickException(
+            f"{shapes} has no frame_id column; export it with `sm-db export` first"
+        )
+    if edited.crs is not None and edited.crs.to_epsg() != 4326:
+        edited = edited.to_crs(4326)
+
+    known = {f.frame_id: f for f in db_mod.read_frames(database)}
+    margin, snap = _build_parameters(database)
+    moved: dict[str, dict] = {}
+    unknown = 0
+
+    for _, row in edited.iterrows():
+        frame = known.get(row["frame_id"])
+        if frame is None:
+            unknown += 1
+            continue
+        # Compare the geometry, not a box derived from it: the stored bbox is the
+        # footprint's envelope plus the margin, snapped, so deriving one from an
+        # untouched polygon never matches and every frame would look edited.
+        # The tolerance covers the rounding a shapefile applies on the way out.
+        if row.geometry.equals_exact(frame.polygon, 1e-6):
+            continue
+        projected = to_map(row.geometry, frame.epsg)
+        # Pad and snap exactly as a build would, so an edited frame is pinned the
+        # same way every other frame is.
+        bbox = list(snap_bbox(*projected.bounds, margin=margin, snap=snap))
+        moved[row["frame_id"]] = {"bbox": bbox, "epsg": frame.epsg}
+
+    if unknown:
+        click.echo(f"  ignored {unknown} shape(s) with an unknown frame_id", err=True)
+
+    output.write_text(json.dumps({"overrides": moved, "merges": []}, indent=2) + "\n")
+    click.echo(f"{len(moved)} frame(s) moved; wrote {output}")
+
+
+@cli.command()
+@click.option(
+    "--catalog",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Catalog holding the granule footprints.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Write the full per-frame report here as JSON.",
+)
+@click.option(
+    "--min-passes",
+    default=5,
+    show_default=True,
+    help="Only measure frames with at least this many acquisitions.",
+)
+@click.option(
+    "--poor-below",
+    default=0.9,
+    show_default=True,
+    help="Call an acquisition poor when it covers less than this of its frame.",
+)
+@_DB_OPTION
+def coverage(
+    catalog: Path,
+    output: Path | None,
+    min_passes: int,
+    poor_below: float,
+    database: Path,
+) -> None:
+    """Measure the area every acquisition of a frame actually shares.
+
+    A stack can only use ground that every date covers, so the number that
+    matters is the intersection, not the frame. Where a few narrow passes drag it
+    down, this shows what dropping them would buy.
+    """
+    from sm_db.coverage import drop_curve, frame_coverage
+
+    frames = {f.frame_id: f for f in db_mod.read_frames(database)}
+    observed = db_mod.read_acquisitions(database)
+    if not observed:
+        raise click.ClickException(
+            f"{database} has no acquisitions table; rebuild it with `sm-db update`"
+        )
+    by_name = {g.name: g for g in granules_mod.load_catalog(catalog)}
+
+    targets = [(fid, acq) for fid, acq in observed.items() if len(acq) >= min_passes]
+    click.echo(f"Measuring {len(targets)} frames with >= {min_passes} acquisitions")
+
+    report = {}
+    with click.progressbar(targets, label="Measuring coverage") as bar:
+        for frame_id, acq in bar:
+            frame = frames.get(frame_id)
+            granules = [by_name[a["granule"]] for a in acq if a["granule"] in by_name]
+            if frame is None or not granules:
+                continue
+            measured = frame_coverage(frame, granules)
+            report[frame_id] = {
+                "n_acquisitions": measured.n_acquisitions,
+                "common": measured.common,
+                "worst": measured.worst,
+                "poor": measured.below(poor_below),
+                "drop_curve": drop_curve(measured),
+            }
+
+    _summarise_coverage(report, poor_below)
+    if output:
+        output.write_text(json.dumps(report, indent=2) + "\n")
+        click.echo(f"Wrote {output}")
+
+
+def _summarise_coverage(report: dict, poor_below: float) -> None:
+    """Print the shape of a coverage report: how much is lost, and to how few."""
+    if not report:
+        click.echo("No frames measured.")
+        return
+
+    commons = sorted(r["common"] for r in report.values())
+    healthy = [f for f, r in report.items() if r["common"] >= poor_below]
+    hurt = {f: r for f, r in report.items() if r["common"] < poor_below}
+
+    def pct(x):
+        return f"{100 * x:.1f}%"
+
+    click.echo("")
+    click.echo(f"frames measured      : {len(report)}")
+    click.echo(f"median common area   : {pct(commons[len(commons) // 2])}")
+    click.echo(f"worst common area    : {pct(commons[0])}")
+    click.echo(f"frames >= {pct(poor_below)} common : {len(healthy)}")
+    click.echo(f"frames below         : {len(hurt)}")
+
+    if not hurt:
+        return
+
+    # The question is whether a few passes are responsible, which is what the
+    # drop curve answers: if dropping one or two restores most of the area, the
+    # cost of keeping them is paid by every date in the stack.
+    rescued = {1: 0, 2: 0, 5: 0}
+    for r in hurt.values():
+        curve = dict(r["drop_curve"])
+        for k in rescued:
+            if curve.get(k, 0) >= poor_below:
+                rescued[k] += 1
+                break
+    click.echo("")
+    click.echo("of those, restored to the threshold by dropping:")
+    for k in sorted(rescued):
+        click.echo(f"  {k} acquisition(s): {rescued[k]} frames")
+    stubborn = len(hurt) - sum(rescued.values())
+    click.echo(f"  still short after 5: {stubborn} frames")

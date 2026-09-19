@@ -1587,8 +1587,8 @@ function stackedBarsSvg(dates, sensors, W, H, padLeft) {
       y -= h;
       return `<rect class="mk" x="${(cx - bw / 2).toFixed(1)}" y="${(y + 1).toFixed(1)}"
         width="${bw.toFixed(1)}" height="${Math.max(0, h - 1).toFixed(1)}" rx="1.5"
-        fill="${sensorColor(sn)}"
-        data-label="${b.key} &middot; ${sn} &middot; ${b.bySensor[sn]}"><title>${b.key} ${sn}: ${b.bySensor[sn]}</title></rect>`;
+        fill="${sensorColor(sn)}" data-bin="${b.key}"
+        data-label="${b.key} &middot; ${sn} &middot; ${b.bySensor[sn]} &middot; click to isolate"><title>${b.key} ${sn}: ${b.bySensor[sn]}</title></rect>`;
     }).join("");
     return parts;
   }).join("");
@@ -1752,8 +1752,101 @@ function stacksChart(feature) {
     </svg>`;
 }
 
-function timeSeriesBody(feature) {
-  const p = feature.properties;
+// The binned chart says how much and roughly when; this says exactly when. Every
+// acquisition is a tick at its true date, and under it the gap to the previous
+// pass is plotted where it happened -- which is where a cadence change shows
+// itself, such as 6 days becoming 12 when a satellite is lost.
+// A frame's properties, cut down to the acquisitions inside one bin key such as
+// "2019" or "2019-04". Everything the panel reads from a chronology is filtered
+// together so the charts and the table cannot disagree.
+function _sliceProperties(p, bin) {
+  const keep = [];
+  p.dates.forEach((d, i) => { if (d.startsWith(bin)) keep.push(i); });
+  const dates = keep.map(i => p.dates[i]);
+  const counts = {};
+  for (const d of dates) counts[d] = (counts[d] || 0) + 1;
+  return {
+    ...p,
+    dates,
+    sensors: keep.map(i => p.sensors[i]),
+    granules: p.granules ? keep.map(i => p.granules[i]) : undefined,
+    duplicate_dates: Object.keys(counts).filter(d => counts[d] > 1).sort(),
+    first: dates[0] || p.first,
+    last: dates[dates.length - 1] || p.last,
+  };
+}
+
+function exactTimelineSvg(p) {
+  const W = 760, PAD_L = 46, PAD_R = 20;
+  const plotW = W - PAD_L - PAD_R;
+  const t = p.dates.map(d => new Date(d).getTime());
+  const lo = Math.min(...t), hi = Math.max(...t);
+  const span = Math.max(1, hi - lo);
+  const x = v => PAD_L + ((v - lo) / span) * plotW;
+
+  const TICK_TOP = 18, TICK_BOT = 44;
+  const H = 176, BASE = 150;
+
+  // Year gridlines give the eye somewhere to anchor on a decade-long axis.
+  const years = [];
+  const firstYear = new Date(lo).getUTCFullYear();
+  const lastYear = new Date(hi).getUTCFullYear();
+  for (let y = firstYear; y <= lastYear; y++) {
+    const v = Date.UTC(y, 0, 1);
+    if (v < lo || v > hi) continue;
+    years.push(`<line x1="${x(v).toFixed(1)}" y1="${TICK_TOP}" x2="${x(v).toFixed(1)}"
+                  y2="${BASE}" stroke="var(--border)" stroke-dasharray="2 4"/>
+                <text class="ax" x="${x(v).toFixed(1)}" y="${H - 4}"
+                  text-anchor="middle">${y}</text>`);
+  }
+
+  const ticks = p.dates.map((d, i) => {
+    const cx = x(t[i]).toFixed(1);
+    const dup = p.duplicate_dates.includes(d);
+    return `<line class="mk" x1="${cx}" y1="${TICK_TOP}" x2="${cx}" y2="${TICK_BOT}"
+      stroke="${dup ? cssVar("--dup") : sensorColor(p.sensors[i])}"
+      stroke-width="${dup ? 2.5 : 1.2}"
+      data-label="${d} &middot; ${p.sensors[i]}${dup ? " &middot; duplicate" : ""}"></line>`;
+  }).join("");
+
+  // Interval to the previous pass, drawn where it ends.
+  const gapTop = 60;
+  const gaps = [];
+  for (let i = 1; i < p.dates.length; i++) {
+    const days = Math.round((t[i] - t[i - 1]) / 86400000);
+    if (days <= 0) continue;                       // duplicates carry no interval
+    gaps.push({ at: t[i], days });
+  }
+  let gapMarks = "";
+  let gapAxis = "";
+  if (gaps.length) {
+    const maxGap = Math.max(...gaps.map(g => g.days));
+    const y = d => BASE - (BASE - gapTop) * (d / maxGap);
+    gapMarks = gaps.map(g =>
+      `<circle class="mk" cx="${x(g.at).toFixed(1)}" cy="${y(g.days).toFixed(1)}" r="2"
+         fill="var(--accent)"
+         data-label="${g.days} d gap ending ${new Date(g.at).toISOString().slice(0, 10)}"></circle>`
+    ).join("");
+    gapAxis = `<text class="ax" x="6" y="${gapTop + 4}">${maxGap} d</text>
+               <text class="ax" x="6" y="${BASE}">0</text>
+               <text class="ax" x="${PAD_L}" y="${gapTop - 4}">gap to previous pass</text>`;
+  }
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Every acquisition at its exact date, and the gap before it">
+    ${years.join("")}
+    <line x1="${PAD_L}" y1="${BASE}" x2="${W - PAD_R}" y2="${BASE}" stroke="var(--border)"/>
+    ${ticks}${gapMarks}${gapAxis}
+    <text class="ax" x="${PAD_L}" y="${TICK_TOP - 6}">${p.first}</text>
+    <text class="ax" x="${W - PAD_R}" y="${TICK_TOP - 6}" text-anchor="end">${p.last}</text>
+  </svg>`;
+}
+
+function timeSeriesBody(feature, bin) {
+  const whole = feature.properties;
+  // Isolating a bin filters the chronology and leaves the summary alone, so the
+  // stat row still describes the frame while everything below describes the slice.
+  const p = bin ? _sliceProperties(whole, bin) : whole;
   const W = 760, PAD_L = 46, PAD_R = 20;
   const plotW = W - PAD_L - PAD_R;
   const t = p.dates.map(d => new Date(d).getTime());
@@ -1906,6 +1999,13 @@ ${warn}
 <h3>Acquisitions</h3>
 <div>${legend}</div>
 ${chart1}
+<h3>Exact timeline${bin ? ` &mdash; ${bin}` : ""}</h3>
+<p class="note">Every acquisition at its true date, coloured by sensor, with the gap
+  to the previous pass below. Duplicates are drawn thicker in red.
+  ${bin
+    ? `Showing ${bin} only. <button class="btn" id="bin-clear">show all years</button>`
+    : "Click a bar above to isolate one year."}</p>
+${p.dates.length ? exactTimelineSvg(p) : '<p class="note">Nothing in this slice.</p>'}
 <h3>Interval between passes</h3>
 ${chart2}
 ${stacksChart(feature)}
@@ -1939,19 +2039,32 @@ function attachPanelTooltips(panel) {
   body.addEventListener("mouseleave", () => { tip.hidden = true; });
 }
 
-function openFramePanel(feature) {
+function openFramePanel(feature, bin) {
   const p = feature.properties;
   if (!p.dates.length) return;
   const panel = document.getElementById("fpanel");
   panel.innerHTML =
     `<div id="fpanel-head">
-       <span class="t">${p.frame_id}</span>
+       <span class="t">${p.frame_id}${bin ? ` &middot; ${bin}` : ""}</span>
        <button id="fpanel-close" title="Close" aria-label="Close">&times;</button>
      </div>
-     <div id="fpanel-body">${timeSeriesBody(feature)}</div>
+     <div id="fpanel-body">${timeSeriesBody(feature, bin)}</div>
      <div class="tip" id="fpanel-tip" hidden></div>`;
   panel.hidden = false;
   document.getElementById("fpanel-close").onclick = () => { panel.hidden = true; };
+
+  // Drill in on a bar, and back out again, keeping the scroll position so the
+  // chart does not jump away under the pointer.
+  const body = panel.querySelector("#fpanel-body");
+  body.addEventListener("click", ev => {
+    const bar = ev.target.closest("[data-bin]");
+    const clear = ev.target.closest("#bin-clear");
+    if (!bar && !clear) return;
+    const offset = body.scrollTop;
+    openFramePanel(feature, clear ? null : bar.dataset.bin);
+    panel.querySelector("#fpanel-body").scrollTop = offset;
+  });
+
   attachPanelTooltips(panel);
   dragBy(panel, document.getElementById("fpanel-head"));
 }

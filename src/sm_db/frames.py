@@ -336,21 +336,61 @@ def frames_for_granule(
             # single frame carry its own bounds without disturbing its neighbours.
             frame_id = tiling.format_frame_id(track, tile.index, granule.beam_mode)
             own = (overrides or {}).get(frame_id, {})
-            frames.append(
-                _build_frame(
-                    granule,
-                    orbit,
-                    track,
-                    tile,
-                    segment_node,
-                    margin,
-                    snap,
-                    float(own.get("overlap", overlap)),
-                    float(own.get("shift", shift)),
-                    float(own.get("inset", inset)),
-                )
+            built = _build_frame(
+                granule,
+                orbit,
+                track,
+                tile,
+                segment_node,
+                margin,
+                snap,
+                float(own.get("overlap", overlap)),
+                float(own.get("shift", shift)),
+                float(own.get("inset", inset)),
             )
+            frames.append(_apply_bbox_override(built, own))
     return frames
+
+
+def _apply_bbox_override(frame: Frame, own: dict) -> Frame:
+    """Replace a frame's grid with one given outright, if the override has it.
+
+    An edited GIS file says where a frame should be, not how to derive it, so a
+    ``bbox`` entry wins over the orbit-derived geometry. The footprint becomes
+    that rectangle, which is what the frame now is; `fill_pct` follows, and reads
+    100 because a box fills its own envelope.
+
+    Parameters
+    ----------
+    frame :
+        The frame as derived.
+    own :
+        That frame's override, possibly carrying ``bbox`` and ``epsg``.
+
+    Returns
+    -------
+    Frame
+    """
+    import dataclasses
+
+    box_values = own.get("bbox")
+    if not box_values:
+        return frame
+
+    from shapely.geometry import box
+
+    xmin, ymin, xmax, ymax = (int(v) for v in box_values)
+    epsg = int(own.get("epsg", frame.epsg))
+    return dataclasses.replace(
+        frame,
+        epsg=epsg,
+        xmin=xmin,
+        ymin=ymin,
+        xmax=xmax,
+        ymax=ymax,
+        polygon=_unproject(box(xmin, ymin, xmax, ymax), epsg),
+        fill_pct=100.0,
+    )
 
 
 def _apply_merges(
