@@ -297,6 +297,53 @@ class TestPerFrameOverrides:
         assert before == after
 
 
+class TestMergedFrames:
+    def _ids(self, granule, orbit, **kw):
+        return sorted(f.frame_id for f in frames_for_granule(granule, orbit, **kw))
+
+    def test_two_frames_become_one(self, granule, orbit):
+        plain = self._ids(granule, orbit)
+        group = plain[:2]
+        merged = self._ids(granule, orbit, merges=[group])
+        assert group[0] in merged
+        assert group[1] not in merged
+        assert len(merged) == len(plain) - 1
+
+    def test_merged_frame_spans_both(self, granule, orbit):
+        plain = {f.frame_id: f for f in frames_for_granule(granule, orbit)}
+        group = sorted(plain)[:2]
+        merged = {
+            f.frame_id: f for f in frames_for_granule(granule, orbit, merges=[group])
+        }
+        one = merged[group[0]]
+        # The union must reach at least as far as either part did on its own.
+        for part in group:
+            assert one.xmin <= plain[part].xmin and one.ymin <= plain[part].ymin
+            assert one.xmax >= plain[part].xmax and one.ymax >= plain[part].ymax
+
+    def test_keeps_the_first_members_id(self, granule, orbit):
+        group = self._ids(granule, orbit)[:2]
+        merged = self._ids(granule, orbit, merges=[group])
+        assert group[0] in merged
+
+    def test_group_the_scene_cannot_fill_is_left_alone(self, granule, orbit):
+        """A merged frame must be filled edge to edge like any other."""
+        plain = self._ids(granule, orbit)
+        absent = "t095_999999_s3"
+        merged = self._ids(granule, orbit, merges=[[plain[0], absent]])
+        assert merged == plain
+
+    def test_non_consecutive_group_is_ignored(self, granule, orbit):
+        plain = self._ids(granule, orbit)
+        if len(plain) < 3:
+            pytest.skip("scene yields too few frames to test a gap")
+        merged = self._ids(granule, orbit, merges=[[plain[0], plain[2]]])
+        assert merged == plain
+
+    def test_no_merges_changes_nothing(self, granule, orbit):
+        assert self._ids(granule, orbit, merges=[]) == self._ids(granule, orbit)
+
+
 class TestNodeCrossingEdgeCase:
     def test_scene_ending_just_past_the_node_does_not_raise(self, granule, orbit):
         """Regression: a scene crossing the ANX by less than the guard.

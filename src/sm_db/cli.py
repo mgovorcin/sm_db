@@ -121,6 +121,13 @@ def cli() -> None:
     "A frame listed here ignores the global --shift/--overlap/--inset.",
 )
 @click.option(
+    "--merge",
+    "merge_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON list of frame-id groups to emit as single frames, as the viewer "
+    'exports it: [["t095_000003_s3", "t095_000004_s3"]].',
+)
+@click.option(
     "--min-fill",
     default=DEFAULT_MIN_FILL,
     show_default=True,
@@ -147,6 +154,7 @@ def build(
     overlap_seconds: float,
     inset_m: float,
     overrides: Path | None,
+    merge_file: Path | None,
     min_fill: float,
     geojson: Path | None,
 ) -> None:
@@ -170,9 +178,11 @@ def build(
     if not granules:
         raise click.ClickException("No granules matched; nothing to build.")
 
-    per_frame = json.loads(overrides.read_text()) if overrides else {}
+    per_frame, groups = _load_adjustments(overrides, merge_file)
     if per_frame:
         click.echo(f"{len(per_frame)} frame(s) carry their own bounds")
+    if groups:
+        click.echo(f"{len(groups)} group(s) merged into single frames")
 
     orbits = OrbitLookup(orbit_dir)
     defined: dict[str, Frame] = {}
@@ -195,6 +205,7 @@ def build(
                 shift=shift_seconds,
                 inset=inset_m,
                 overrides=per_frame,
+                merges=groups,
             )
             if not found:
                 skipped.append(f"{granule.name}: too short to fill a frame")
@@ -224,6 +235,41 @@ def build(
     if geojson:
         _write_geojson(defined.values(), geojson)
         click.echo(f"Wrote {geojson}")
+
+
+def _load_adjustments(
+    overrides: Path | None, merge_file: Path | None
+) -> tuple[dict, list]:
+    """Read per-frame bounds and merge groups, from one file or two.
+
+    The viewer exports both in a single ``{"overrides": ..., "merges": ...}``
+    document, so either flag accepts that shape; a bare mapping is still read as
+    overrides alone and a bare list as merges alone.
+
+    Parameters
+    ----------
+    overrides, merge_file :
+        Paths given on the command line; either may be `None`.
+
+    Returns
+    -------
+    tuple
+        ``(overrides, merges)``.
+    """
+    per_frame: dict = {}
+    groups: list = []
+    for path in (overrides, merge_file):
+        if path is None:
+            continue
+        data = json.loads(path.read_text())
+        if isinstance(data, list):
+            groups = data
+        elif "overrides" in data or "merges" in data:
+            per_frame = {**per_frame, **data.get("overrides", {})}
+            groups = data.get("merges", groups)
+        else:
+            per_frame = {**per_frame, **data}
+    return per_frame, groups
 
 
 def _write_geojson(frames: list[Frame], path: Path) -> None:
@@ -495,6 +541,13 @@ def main() -> None:
     "A frame listed here ignores the global --shift/--overlap/--inset.",
 )
 @click.option(
+    "--merge",
+    "merge_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="JSON list of frame-id groups to emit as single frames, as the viewer "
+    'exports it: [["t095_000003_s3", "t095_000004_s3"]].',
+)
+@click.option(
     "--min-fill",
     default=DEFAULT_MIN_FILL,
     show_default=True,
@@ -523,6 +576,7 @@ def update(
     overlap_seconds: float,
     inset_m: float,
     overrides: Path | None,
+    merge_file: Path | None,
     min_fill: float,
     no_download: bool,
 ) -> None:
@@ -550,9 +604,11 @@ def update(
         )
     end = end or datetime.date.today().isoformat()
 
-    per_frame = json.loads(overrides.read_text()) if overrides else {}
+    per_frame, groups = _load_adjustments(overrides, merge_file)
     if per_frame:
         click.echo(f"{len(per_frame)} frame(s) carry their own bounds")
+    if groups:
+        click.echo(f"{len(groups)} group(s) merged into single frames")
 
     click.echo(f"Catalog holds {len(known)} granules; querying ASF {start} to {end}")
     found = granules_mod.query_asf(
@@ -602,6 +658,7 @@ def update(
                 shift=shift_seconds,
                 inset=inset_m,
                 overrides=per_frame,
+                merges=groups,
             )
             found_frames = [f for f in found_frames if f.fill_pct >= min_fill]
             covered.append((granule, [f.frame_id for f in found_frames]))

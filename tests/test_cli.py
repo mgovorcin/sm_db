@@ -155,3 +155,43 @@ class TestGeojson:
         assert feature["properties"]["frame_id"] == "t095_000003_s3"
         assert feature["properties"]["epsg"] == 32604
         assert feature["properties"]["bbox"] == [657240, 183120, 753690, 243360]
+
+
+class TestAdjustmentsFile:
+    def _load(self, tmp_path, name, payload):
+        import json
+
+        from sm_db.cli import _load_adjustments
+
+        path = tmp_path / name
+        path.write_text(json.dumps(payload))
+        return _load_adjustments(path, None)
+
+    def test_reads_the_viewers_combined_export(self, tmp_path):
+        overrides, merges = self._load(
+            tmp_path,
+            "adj.json",
+            {
+                "overrides": {"t095_000003_s3": {"shift": 1.2}},
+                "merges": [["t095_000004_s3", "t095_000005_s3"]],
+            },
+        )
+        assert overrides == {"t095_000003_s3": {"shift": 1.2}}
+        assert merges == [["t095_000004_s3", "t095_000005_s3"]]
+
+    def test_bare_mapping_is_overrides(self, tmp_path):
+        overrides, merges = self._load(
+            tmp_path, "o.json", {"t095_000003_s3": {"inset": 2000}}
+        )
+        assert overrides == {"t095_000003_s3": {"inset": 2000}}
+        assert merges == []
+
+    def test_bare_list_is_merges(self, tmp_path):
+        overrides, merges = self._load(tmp_path, "m.json", [["a", "b"]])
+        assert overrides == {}
+        assert merges == [["a", "b"]]
+
+    def test_nothing_given(self):
+        from sm_db.cli import _load_adjustments
+
+        assert _load_adjustments(None, None) == ({}, [])

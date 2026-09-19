@@ -580,7 +580,8 @@ table.acq tr.dup td { color: var(--dup); }
 
 #panel-toggle {
   position: absolute; top: 10px; right: 232px; z-index: 3;
-  width: 30px; height: 28px; padding: 0; cursor: pointer; font-size: 14px; line-height: 1;
+  width: 30px; height: 28px; padding: 0; cursor: pointer; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--surface-1); color: var(--text-3);
   border: 1px solid var(--border); border-radius: 7px;
 }
@@ -715,9 +716,18 @@ table.acq tr.dup td { color: var(--dup); }
           <label>Trim each side (km)</label>
           <div class="grow"><input type="range" id="g-inset" min="-100" max="100" step="1" value="0">
             <input type="number" id="g-inset-v" value="0" step="1"></div>
+          <label style="margin-top:12px;">Merge with a neighbour</label>
+          <div class="row">
+            <button class="btn" id="g-merge-prev">+ previous</button>
+            <button class="btn" id="g-merge-next">+ next</button>
+            <button class="btn" id="g-unmerge">unmerge</button>
+          </div>
+          <p class="note" style="margin-top:6px;">Two consecutive frames become one,
+            keeping the lower id, so a target sitting on the boundary is whole in a
+            single frame.</p>
           <div class="row" style="margin-top:9px;">
             <button class="btn" id="g-reset">Reset this frame</button>
-            <button class="btn" id="g-export">Export overrides</button>
+            <button class="btn" id="g-export">Export adjustments</button>
           </div>
           <div class="flist" id="g-list" style="max-height:150px;margin-top:9px;"></div>
         </div>
@@ -750,7 +760,14 @@ table.acq tr.dup td { color: var(--dup); }
     </div>
     <div id="fpanel" hidden></div>
     <button id="panel-toggle" class="on" title="Open the time series panel when a frame is clicked"
-            aria-label="Open the time series panel when a frame is clicked">&#9203;</button>
+            aria-label="Open the time series panel when a frame is clicked">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none"
+           stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+           stroke-linejoin="round" aria-hidden="true">
+        <rect x="1.2" y="3.2" width="9.6" height="9.6" rx="1.6"/>
+        <path d="M6.2 3.2V1.9a.7.7 0 0 1 .7-.7h7.2a.7.7 0 0 1 .7.7v7.2a.7.7 0 0 1-.7.7h-1.3"/>
+      </svg>
+    </button>
     <div id="basemap">
       <button data-base="dark" class="on">Dark</button>
       <button data-base="light">Light</button>
@@ -886,6 +903,7 @@ const state = {
   minFill: 0,
   track: "",
   overrides: {},          // frame_id -> {shiftKm, growKm, insetKm}
+  merges: [],             // arrays of consecutive frame ids drawn as one
   showSites: false,
   autoPanel: true,
   d0: null,
@@ -1079,6 +1097,49 @@ function unit(v, kx) {
   return [v[0] / n * (kx / kx), v[1] / n];
 }
 
+// Frames are contiguous along track, so a merged group is drawn as one
+// quadrilateral running from the first member's leading edge to the last
+// member's trailing edge -- the same shape `--merge` produces on a rebuild.
+function neighbourId(p, step) {
+  return `t${String(p.track).padStart(3, "0")}_` +
+         `${String(p.frame_index + step).padStart(6, "0")}_${p.beam.toLowerCase()}`;
+}
+
+function groupOf(frameId) {
+  return state.merges.find(g => g.includes(frameId)) || null;
+}
+
+function mergedFeatures(features) {
+  if (!state.merges.length) return features;
+  const byId = new Map(features.map(f => [f.properties.frame_id, f]));
+  const used = new Set();
+  const out = [];
+
+  for (const group of state.merges) {
+    const members = group.map(id => byId.get(id));
+    if (members.some(m => !m)) continue;              // not all are shown
+    const ordered = members.slice().sort(
+      (a, b) => a.properties.frame_index - b.properties.frame_index);
+    const first = adjustRing(ordered[0].geometry.coordinates[0].slice(0, 4),
+                             ordered[0].properties.frame_id);
+    const last = adjustRing(
+      ordered[ordered.length - 1].geometry.coordinates[0].slice(0, 4),
+      ordered[ordered.length - 1].properties.frame_id);
+    const ring = [first[0], first[1], last[2], last[3]];
+    const acq = ordered.reduce((a, m) => a + m.properties.n_acquisitions, 0);
+    out.push({
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [[...ring, ring[0]]] },
+      properties: { ...ordered[0].properties, n_acquisitions: acq, _merged: group.length }
+    });
+    group.forEach(id => used.add(id));
+  }
+  for (const f of features) {
+    if (!used.has(f.properties.frame_id)) out.push(f);
+  }
+  return out;
+}
+
 function adjustedFeature(f) {
   const ring = adjustRing(f.geometry.coordinates[0].slice(0, 4), f.properties.frame_id);
   return {
@@ -1105,12 +1166,16 @@ function updateCliLine() {
 
   const list = document.getElementById("g-list");
   const ids = Object.keys(state.overrides);
-  list.innerHTML = ids.length
+  const mergeRows = state.merges.map(g =>
+    `<button data-ov="${g[0]}"><span>${g[0]}</span>
+       <span class="n">merged with ${g.length - 1} more</span>
+       <i class="sw" style="background:${cssVar("--accent")}"></i></button>`).join("");
+  list.innerHTML = (mergeRows || "") + (ids.length
     ? ids.sort().map(k =>
         `<button data-ov="${k}"><span>${k}</span>
            <span class="n">${overrideFlags(state.overrides[k])}</span>
            <i class="sw" style="background:${cssVar("--grid-line")}"></i></button>`).join("")
-    : '<div class="note" style="margin:6px 0 0">No frames adjusted yet.</div>';
+    : (mergeRows ? "" : '<div class="note" style="margin:6px 0 0">No frames adjusted yet.</div>'));
 }
 
 // The overrides file `sm-db build --overrides` reads: seconds along track,
@@ -1125,10 +1190,12 @@ function exportOverrides() {
     if (o.insetKm) entry.inset = Math.round(o.insetKm * 1000);
     if (Object.keys(entry).length) out[id] = entry;
   }
-  const blob = new Blob([JSON.stringify(out, null, 2) + "\n"], { type: "application/json" });
+  const payload = { overrides: out, merges: state.merges };
+  const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"],
+                        { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "sm_frame_overrides.json";
+  a.download = "sm_frame_adjustments.json";
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -1155,8 +1222,8 @@ function paint() {
 
   const fc = {
     type: "FeatureCollection",
-    features: shown.map(f => {
-      const adj = adjustedFeature(f);
+    features: mergedFeatures(shown).map(f => {
+      const adj = f.properties._merged ? f : adjustedFeature(f);
       return { ...adj, properties: { ...f.properties, _color: colorOf(f.properties) } };
     })
   };
@@ -1806,6 +1873,36 @@ for (const [id, key] of BOUND_CONTROLS) {
 document.getElementById("g-reset").onclick = () => {
   if (state.selected) delete state.overrides[state.selected];
   syncBoundsSliders();
+  paint();
+};
+function mergeWith(step) {
+  const id = state.selected;
+  if (!id) return;
+  const f = FRAMES.features.find(x => x.properties.frame_id === id);
+  if (!f) return;
+  const neighbour = neighbourId(f.properties, step);
+  if (!FRAMES.features.some(x => x.properties.frame_id === neighbour)) return;
+
+  // Growing an existing group keeps it one frame rather than making two.
+  const existing = groupOf(id) || groupOf(neighbour);
+  if (existing) {
+    for (const candidate of [id, neighbour]) {
+      if (!existing.includes(candidate)) existing.push(candidate);
+    }
+    existing.sort();
+  } else {
+    state.merges.push([id, neighbour].sort());
+  }
+  updateCliLine();
+  paint();
+}
+
+document.getElementById("g-merge-prev").onclick = () => mergeWith(-1);
+document.getElementById("g-merge-next").onclick = () => mergeWith(1);
+document.getElementById("g-unmerge").onclick = () => {
+  const group = state.selected && groupOf(state.selected);
+  if (group) state.merges.splice(state.merges.indexOf(group), 1);
+  updateCliLine();
   paint();
 };
 document.getElementById("g-export").onclick = exportOverrides;

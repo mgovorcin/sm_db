@@ -250,6 +250,7 @@ def frames_for_granule(
     shift: float = DEFAULT_SHIFT,
     inset: float = DEFAULT_INSET,
     overrides: dict[str, dict] | None = None,
+    merges: list[list[str]] | None = None,
 ) -> list[Frame]:
     """Return the frames a granule fully covers, with their pinned grids.
 
@@ -278,6 +279,16 @@ def frames_for_granule(
         Seconds to slide every frame along track. See `DEFAULT_SHIFT`.
     inset :
         Metres trimmed from each side across track. See `DEFAULT_INSET`.
+    merges :
+        Groups of frame IDs to emit as one frame instead of several. Tiles are
+        contiguous in time, so a group of consecutive ones becomes a single frame
+        spanning from the first tile's start to the last tile's stop, taking the
+        first member's ID. A target that straddles a boundary is then whole
+        inside one frame rather than split across two.
+
+        A group is only emitted when the scene covers every member, since a
+        merged frame must be filled edge to edge like any other. Members must
+        share a track and beam and be consecutive; anything else is ignored.
     overrides :
         Per-frame geometry, keyed by frame ID, each a mapping with any of
         ``shift``, ``overlap`` and ``inset``. A frame listed here ignores the
@@ -340,6 +351,61 @@ def frames_for_granule(
                 )
             )
     return frames
+
+
+def _apply_merges(
+    tiles: list[tiling.Tile],
+    track: int,
+    beam: str,
+    merges: list[list[str]] | None,
+) -> list[tiling.Tile]:
+    """Collapse each fully covered merge group into one tile.
+
+    Parameters
+    ----------
+    tiles :
+        Tiles this scene covers, in along-track order.
+    track, beam :
+        Identify the frames these tiles belong to.
+    merges :
+        Groups of frame IDs to combine.
+
+    Returns
+    -------
+    list of sm_db.tiling.Tile
+        In along-track order, with merged groups replaced by a single spanning
+        tile carrying the first member's index.
+    """
+    if not merges:
+        return tiles
+
+    by_id = {tiling.format_frame_id(track, t.index, beam): t for t in tiles}
+    absorbed: set[int] = set()
+    merged: dict[int, tiling.Tile] = {}
+
+    for group in merges:
+        members = [by_id.get(frame_id) for frame_id in group]
+        if len(members) < 2 or any(m is None for m in members):
+            # Not all of the group is covered by this scene, so the merged frame
+            # cannot be filled; leave its members alone rather than emit a
+            # partial one under the merged ID.
+            continue
+        ordered = sorted(members, key=lambda t: t.index)
+        if [t.index for t in ordered] != list(
+            range(ordered[0].index, ordered[0].index + len(ordered))
+        ):
+            continue
+        merged[ordered[0].index] = tiling.Tile(
+            ordered[0].index, ordered[0].start, ordered[-1].stop
+        )
+        absorbed.update(t.index for t in ordered)
+
+    out = [
+        merged.get(t.index) or t
+        for t in tiles
+        if t.index not in absorbed or t.index in merged
+    ]
+    return sorted(out, key=lambda t: t.start)
 
 
 def _build_frame(
