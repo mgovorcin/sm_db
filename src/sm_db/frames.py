@@ -310,14 +310,17 @@ def frames_for_granule(
     for track, segment_node, segment_period in segments:
         # Shrink the scene by the timing guard before asking which tiles it fills,
         # so a tile is only claimed when it stays covered under the worst rounding.
-        start_since = (scene_start - segment_node).total_seconds() + guard
+        # Clamp to the node before comparing: for the segment after a crossing the
+        # scene begins before the node, and a scene that reaches past it by less
+        # than the guard would otherwise leave a start later than its own stop.
+        start_since = max((scene_start - segment_node).total_seconds() + guard, 0.0)
         stop_since = (scene_stop - segment_node).total_seconds() - guard
         if stop_since <= start_since:
             continue
         tiles = tiling.tiles_covered_by(
-            max(start_since, 0.0), stop_since, tile_seconds, segment_period
+            start_since, stop_since, tile_seconds, segment_period
         )
-        for tile in tiles:
+        for tile in _apply_merges(tiles, track, granule.beam_mode, merges):
             # The ID is known before the geometry is built, which is what lets a
             # single frame carry its own bounds without disturbing its neighbours.
             frame_id = tiling.format_frame_id(track, tile.index, granule.beam_mode)

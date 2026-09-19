@@ -295,3 +295,36 @@ class TestPerFrameOverrides:
             )
         )
         assert before == after
+
+
+class TestNodeCrossingEdgeCase:
+    def test_scene_ending_just_past_the_node_does_not_raise(self, granule, orbit):
+        """Regression: a scene crossing the ANX by less than the guard.
+
+        The segment after the crossing starts before its own node, so the start
+        is clamped to zero while the stop stays negative. Comparing before
+        clamping let that pair through and `tiles_covered_by` rejected it.
+        """
+        import dataclasses
+        import datetime
+
+        from .conftest import ANX
+
+        crossing = dataclasses.replace(
+            granule,
+            start=ANX - datetime.timedelta(seconds=20),
+            stop=ANX + datetime.timedelta(milliseconds=13),
+        )
+        frames_for_granule(crossing, orbit)  # must not raise
+
+    def test_scene_ending_exactly_at_the_node(self, granule, orbit):
+        import dataclasses
+        import datetime
+
+        from .conftest import ANX
+
+        crossing = dataclasses.replace(
+            granule, start=ANX - datetime.timedelta(seconds=25), stop=ANX
+        )
+        for frame in frames_for_granule(crossing, orbit):
+            assert frame.track == granule.track  # nothing attributed past the node
