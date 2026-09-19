@@ -1,0 +1,85 @@
+name: Update stripmap catalog
+
+# Keeps the committed stripmap archive current: queries ASF for acquisitions
+# since the catalog's last date, downloads the orbits the new ones need,
+# rebuilds the frame database and re-renders the map.
+#
+# Everything comes from public sources -- the ASF search API and the public
+# s1-orbits bucket -- so no credentials are needed.
+
+on:
+  schedule:
+    # Every day at 02:00 UTC. Precise orbits lag an acquisition by ~20 days, so
+    # a daily run mostly picks up frames for scenes acquired a few weeks ago;
+    # that is expected, and the catalog holds the granules meanwhile.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      start:
+        description: 'Query from this date instead of continuing the catalog'
+        required: false
+      beams:
+        description: 'Space-separated beams to limit to, e.g. "S3 S6"'
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-catalog
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[update]'
+
+      # Orbit files are large and re-fetching them every run would be slow and
+      # rude to the source, so they are cached rather than committed.
+      - name: Restore orbit cache
+        uses: actions/cache@v4
+        with:
+          path: orbits
+          key: orbits-${{ github.run_id }}
+          restore-keys: orbits-
+
+      - name: Update catalog, database and map
+        run: |
+          EXTRA=""
+          if [ -n "${{ github.event.inputs.start }}" ]; then
+            EXTRA="$EXTRA --start ${{ github.event.inputs.start }}"
+          fi
+          for beam in ${{ github.event.inputs.beams }}; do
+            EXTRA="$EXTRA --beam $beam"
+          done
+          sm-db update $EXTRA
+
+      - name: Verify the database still describes the data
+        run: |
+          sm-db check \
+            --catalog catalog/sm_granules.json \
+            --orbit-dir orbits \
+            -d catalog/sm_frames.sqlite3
+
+      - name: Commit
+        run: |
+          git config user.name 'github-actions'
+          git config user.email 'github-actions@github.com'
+          if [[ -n $(git status -s catalog docs) ]]; then
+            git add catalog docs/frame-viewer.html
+            git commit -m "Update stripmap catalog [skip ci]"
+            git push
+          else
+            echo "No changes to commit"
+          fi

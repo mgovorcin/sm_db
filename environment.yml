@@ -1,0 +1,17 @@
+name: sm-db-env
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - click
+  - numpy
+  - pyproj
+  - requests
+  - shapely
+  - utm
+  # Optional: only needed to write the frames GeoPackage, not the sqlite COMPASS reads.
+  - geopandas
+  # Dev
+  - pytest
+  - pytest-cov
+  - ruff

@@ -1,0 +1,61 @@
+ci:
+  autofix_prs: false
+
+# `pre-commit install` wires up both the per-commit hooks and the pre-push gate
+# (lint/format/type on every commit; the full test suite additionally on push).
+default_install_hook_types: [pre-commit, pre-push]
+
+# Generated artifacts: the catalog, the frame database and the rendered map are
+# written by the scheduled job, not hand-edited, and the viewer is mostly an
+# embedded HTML/JS template.
+exclude: ^(catalog/|docs/frame-viewer\.html$|orbits/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: "v6.0.0"
+    hooks:
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-added-large-files
+        # Orbit files and any stray product are far over this; the repo holds
+        # metadata only.
+        args: [--maxkb=2048]
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: "26.1.0"
+    hooks:
+      - id: black
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix, --show-fixes]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: "v1.19.1"
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - types-requests
+          - types-setuptools
+
+  # Full test suite runs on `git push` only (too slow for every commit). Uses the
+  # pytest on PATH, so run pushes from an env with the dev extras installed
+  # (`pip install -e ".[test]"`).
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (full suite)
+        entry: pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -1,0 +1,17 @@
+# Orbit files are large and re-fetchable; the scheduled job caches them instead.
+orbits/
+
+# The catalog is committed gzipped (see save_catalog); the plain form is a
+# 13 MB working copy that would bloat the history on every daily run.
+catalog/*.json
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/

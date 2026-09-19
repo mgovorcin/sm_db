@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sm_db"
+version = "0.1.0"
+description = "Sentinel-1 Stripmap frame database: deterministic frame IDs and pinned geocoding grids"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Marin Govorcin" }]
+dependencies = [
+    "click",
+    "numpy",
+    "pyproj",
+    "requests",
+    "shapely>=2",
+    "utm",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+# Downloading the orbits a frame definition needs.
+update = ["sentineleof"]
+
+[project.scripts]
+sm-db = "sm_db.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --doctest-modules --ignore=src/sm_db/cli.py"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "D"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+# The viewer is mostly an embedded HTML/JS template; Python line length does
+# not apply to it, and rewrapping it would only make the markup harder to read.
+"src/sm_db/viewer.py" = ["E501"]
