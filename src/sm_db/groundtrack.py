@@ -198,7 +198,7 @@ def tile_polygon(
     shapely.geometry.Polygon
         The tile footprint in the track's projected CRS.
     """
-    corners = []
+    corners: list[tuple[float, float]] = []
     for when, offsets in ((tile_start, (near, far)), (tile_stop, (far, near))):
         px, py = track.position(when)
         hx, hy = track.heading(when)

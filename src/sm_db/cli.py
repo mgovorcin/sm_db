@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import click
@@ -16,8 +17,20 @@ from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP, snap_bbox
 from sm_db.granules import SM_BEAM_MODES
 from sm_db.tiling import DEFAULT_TILE_SECONDS, parse_frame_id
 
-DEFAULT_TOLERANCE = 250.0
-"""Largest frame bbox disagreement ``check`` accepts between repeat passes [m]."""
+DEFAULT_TOLERANCE = 0.0
+"""Largest bbox disagreement ``check`` accepts, or 0 to derive it from the margin.
+
+A frame's cross-track extent is measured from whichever acquisition defined it
+first, and ASF footprints differ between granules by more than the orbital tube
+does, so re-deriving a frame from a later granule legitimately lands somewhere
+slightly different. Across the 2014-2026 archive that spread is a median of 390 m
+and a p90 of 660 m.
+
+None of that matters while the pinned box still contains what an acquisition
+would produce, which is what the 5 km margin is for. So the failure threshold is
+the margin itself rather than a number picked by hand: beyond it, containment is
+no longer guaranteed. Half the margin is reported as worth a look.
+"""
 
 DEFAULT_MIN_FILL = 0.0
 """Smallest share of a pinned box the footprint may cover, in percent.
@@ -307,7 +320,7 @@ def _load_adjustments(
     return per_frame, groups
 
 
-def _write_geojson(frames: list[Frame], path: Path) -> None:
+def _write_geojson(frames: Iterable[Frame], path: Path) -> None:
     """Write frame footprints as a GeoJSON FeatureCollection."""
     from shapely.geometry import mapping
 
@@ -444,8 +457,11 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
     not available are counted as unverified, not as failures.
     """
     stored = {f.frame_id: f for f in db_mod.read_frames(database)}
+    margin, _ = _build_parameters(database)
+    limit = tolerance or margin
     orbits = OrbitLookup(orbit_dir)
     problems = []
+    spread: list[float] = []
     verified = 0
     unverifiable = 0
 
@@ -474,10 +490,11 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
                 )
                 continue
             worst = max(abs(a - b) for a, b in zip(known.bbox, frame.bbox, strict=True))
-            if worst > tolerance:
+            spread.append(worst)
+            if worst > limit:
                 problems.append(
                     f"{frame.frame_id}: bbox differs by {worst:.0f} m "
-                    f"from {granule.name}"
+                    f"from {granule.name}, past the {limit:.0f} m margin"
                 )
 
     for message in problems:
@@ -487,6 +504,21 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
         f"{len(stored)} frames in the database; "
         f"{verified} granule(s) verified, {len(problems)} problem(s)"
     )
+    if spread:
+        # Always shown, so a slow drift is visible long before it fails anything.
+        ordered = sorted(spread)
+        click.echo(
+            "bbox spread vs the stored grid: "
+            f"median {ordered[len(ordered) // 2]:.0f} m, "
+            f"p90 {ordered[int(len(ordered) * 0.9)]:.0f} m, max {ordered[-1]:.0f} m "
+            f"(fails past {limit:.0f} m)"
+        )
+        near = sum(1 for v in spread if limit / 2 < v <= limit)
+        if near:
+            click.echo(
+                f"{near} re-derivation(s) past half the margin: not a failure, but "
+                "the padding is doing more work than it should."
+            )
     if unverifiable:
         click.echo(
             f"{unverifiable} granule(s) could not be checked: no orbit on hand. "
@@ -971,7 +1003,8 @@ def import_shapes(shapes: Path, output: Path, database: Path) -> None:
         projected = to_map(row.geometry, frame.epsg)
         # Pad and snap exactly as a build would, so an edited frame is pinned the
         # same way every other frame is.
-        bbox = list(snap_bbox(*projected.bounds, margin=margin, snap=snap))
+        left, bottom, right, top = projected.bounds
+        bbox = list(snap_bbox(left, bottom, right, top, margin=margin, snap=snap))
         moved[row["frame_id"]] = {"bbox": bbox, "epsg": frame.epsg}
 
     if unknown:

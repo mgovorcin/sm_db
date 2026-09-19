@@ -89,16 +89,21 @@ def read_orbit_file(path: str | Path) -> OrbitStateVectors:
     if not osv_list:
         raise ValueError(f"No orbit state vectors found in {path}")
 
+    def field(osv: ET.Element, name: str) -> str:
+        """Return a state vector's field, or say which one the file is missing."""
+        element = osv.find(name)
+        if element is None or element.text is None:
+            raise ValueError(f"Orbit state vector has no <{name}> in {path}")
+        return element.text
+
     times = np.array(
         [
-            datetime.datetime.fromisoformat(
-                osv.find("UTC").text.replace("UTC=", "")  # type: ignore[union-attr]
-            )
+            datetime.datetime.fromisoformat(field(osv, "UTC").replace("UTC=", ""))
             for osv in osv_list
         ]
     )
     coords = {
-        name: np.array([float(osv.find(name).text) for osv in osv_list])  # type: ignore[union-attr]
+        name: np.array([float(field(osv, name)) for osv in osv_list])
         for name in ("X", "Y", "Z")
     }
     return OrbitStateVectors(times, coords["X"], coords["Y"], coords["Z"])

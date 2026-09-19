@@ -424,8 +424,8 @@ def _apply_merges(
     merged: dict[int, tiling.Tile] = {}
 
     for group in merges:
-        members = [by_id.get(frame_id) for frame_id in group]
-        if len(members) < 2 or any(m is None for m in members):
+        members = [by_id[frame_id] for frame_id in group if frame_id in by_id]
+        if len(members) < 2 or len(members) != len(group):
             # Not all of the group is covered by this scene, so the merged frame
             # cannot be filled; leave its members alone rather than emit a
             # partial one under the merged ID.
@@ -487,7 +487,10 @@ def _build_frame(
         )
 
     projected = tile_polygon(ground_track, tile_start, tile_stop, near, far)
-    xmin, ymin, xmax, ymax = snap_bbox(*projected.bounds, margin=margin, snap=snap)
+    left, bottom, right, top = projected.bounds
+    xmin, ymin, xmax, ymax = snap_bbox(
+        left, bottom, right, top, margin=margin, snap=snap
+    )
 
     # Measured here, where the tile is still in metres: the ratio is meaningless
     # in degrees, where a square is not square.

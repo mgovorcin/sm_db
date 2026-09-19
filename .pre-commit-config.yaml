@@ -15,7 +15,11 @@ repos:
     rev: "v6.0.0"
     hooks:
       - id: check-case-conflict
-      - id: check-docstring-first
+      # check-docstring-first is deliberately absent: it reads a PEP 258 attribute
+      # docstring -- the string under a module constant, which Sphinx and
+      # mkdocstrings both pick up -- as a second module docstring. Every constant
+      # in this package is documented that way, so the hook is wrong about all of
+      # them and dropping the idiom would cost more than the hook is worth.
       - id: check-merge-conflict
       - id: check-yaml
         args: [--allow-multiple-documents]
