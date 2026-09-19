@@ -279,3 +279,57 @@ class TestSensors:
         page = write_viewer([_frame()], tmp_path / "v.html").read_text()
         for token in ("--s1a", "--s1b", "--s1c", "--s1d"):
             assert token in page
+
+
+class TestPageSize:
+    def _acq(self, n):
+        return [
+            {
+                "date": f"2026-{1 + i // 28:02d}-{1 + i % 28:02d}",
+                "granule": (
+                    f"S1A_S6_SLC__1SDV_2026{i:04d}T115411_"
+                    f"2026{i:04d}T115437_00_00_AA"
+                ),
+                "platform": "S1A",
+            }
+            for i in range(n)
+        ]
+
+    def test_sparse_frames_keep_granule_names(self):
+        acq = {"t095_000003_s3": self._acq(5)}
+        (feature,) = frames_to_geojson([_frame()], acq)["features"]
+        assert len(feature["properties"]["granules"]) == 5
+
+    def test_dense_frames_drop_them(self):
+        """Granule names dominated the page: 4.4 MB of an 8.9 MB archive build."""
+        acq = {"t095_000003_s3": self._acq(200)}
+        (feature,) = frames_to_geojson([_frame()], acq)["features"]
+        assert "granules" not in feature["properties"]
+        # The chronology itself must survive; only the names go.
+        assert len(feature["properties"]["dates"]) == 200
+        assert len(feature["properties"]["sensors"]) == 200
+
+    def test_coordinates_are_rounded(self):
+        (feature,) = frames_to_geojson([_frame()])["features"]
+        for x, y in feature["geometry"]["coordinates"][0]:
+            assert round(x, 5) == x and round(y, 5) == y
+
+    def test_grid_coordinates_are_rounded(self):
+        (feature,) = grids_to_geojson([_frame()])["features"]
+        for x, y in feature["geometry"]["coordinates"][0]:
+            assert round(x, 5) == x and round(y, 5) == y
+
+    def test_page_explains_the_missing_names(self, tmp_path):
+        """The table still renders; the page says why the column is blank."""
+        page = write_viewer(
+            [_frame()],
+            tmp_path / "v.html",
+            acquisitions={"t095_000003_s3": self._acq(200)},
+        ).read_text()
+        data = json.loads(
+            re.search(r"const FRAMES = (\{.*?\});\n", page, re.S).group(1)
+        )
+        assert "granules" not in data["features"][0]["properties"]
+        assert "Granule names are left out" in page
+        # The table cell falls back to a blank, never to a literal "undefined".
+        assert '(p.granules || [])[i] || ""' in page

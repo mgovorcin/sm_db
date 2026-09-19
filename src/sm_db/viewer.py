@@ -101,6 +101,34 @@ def acquisition_counts(
     return dict(counts)
 
 
+COORD_PRECISION = 5
+"""Decimal places kept on exported coordinates: 5 is about a metre.
+
+Full float precision costs megabytes across an archive's frames and buys nothing
+a map can draw.
+"""
+
+GRANULE_DETAIL_MAX = 40
+"""Above this many acquisitions a frame ships dates and sensors but not names.
+
+Granule names are the single largest thing in the page -- 4.4 MB of an 8.9 MB
+archive build -- and a frame with hundreds of passes is one nobody traces
+product by product. Sparse frames, where that tracing is actually useful, keep
+theirs.
+"""
+
+
+def _round_geometry(geometry: dict) -> dict:
+    """Return a GeoJSON geometry with coordinates rounded to `COORD_PRECISION`."""
+
+    def walk(c):
+        if isinstance(c[0], (int, float)):
+            return [round(float(v), COORD_PRECISION) for v in c]
+        return [walk(part) for part in c]
+
+    return {**geometry, "coordinates": walk(geometry["coordinates"])}
+
+
 def _repeat_days(dates: list[str]) -> float | None:
     """Median gap between consecutive acquisition dates, in days.
 
@@ -164,7 +192,11 @@ def _properties(frame: Frame, acquisitions: list[dict]) -> dict:
         "n_acquisitions": len(ordered),
         "dates": dates,
         "sensors": [a["platform"] for a in ordered],
-        "granules": [a["granule"] for a in ordered],
+        **(
+            {"granules": [a["granule"] for a in ordered]}
+            if len(ordered) <= GRANULE_DETAIL_MAX
+            else {}
+        ),
         "platforms": sorted({a["platform"] for a in ordered}),
         "first": dates[0] if dates else None,
         "last": dates[-1] if dates else None,
@@ -198,7 +230,7 @@ def frames_to_geojson(
     features = [
         {
             "type": "Feature",
-            "geometry": mapping(f.polygon),
+            "geometry": _round_geometry(mapping(f.polygon)),
             "properties": _properties(f, acquisitions.get(f.frame_id, [])),
         }
         for f in sorted(frames, key=lambda f: f.frame_id)
@@ -238,7 +270,7 @@ def grids_to_geojson(frames: Iterable[Frame]) -> dict:
         features.append(
             {
                 "type": "Feature",
-                "geometry": mapping(corners),
+                "geometry": _round_geometry(mapping(corners)),
                 "properties": {"frame_id": frame.frame_id, "epsg": frame.epsg},
             }
         )
@@ -296,6 +328,7 @@ def write_viewer(
         .replace("__SUBTITLE__", subtitle)
         .replace("__BUILT__", built)
         .replace("__TILE_SECONDS__", str(tile_seconds))
+        .replace("__GRANULE_MAX__", str(GRANULE_DETAIL_MAX))
         .replace(
             "__AOI__", json.dumps(aoi or {"type": "FeatureCollection", "features": []})
         )
@@ -522,6 +555,9 @@ table.kv td { text-align: right; color: var(--text-1); padding: 2px 0; }
 }
 #fpanel-close:hover { background: var(--surface-2); color: var(--text-1); }
 #fpanel-body { flex: 1; overflow: auto; padding: 12px 14px 16px; }
+#fpanel .mk { cursor: pointer; }
+#fpanel .mk:hover { filter: brightness(1.25); stroke: var(--text-1); }
+#fpanel-tip { position: absolute; z-index: 8; }
 #fpanel-body h3 {
   font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase;
   color: var(--text-2); margin: 16px 0 6px;
@@ -780,6 +816,7 @@ table.acq tr.dup td { color: var(--dup); }
 <script>
 const FRAMES = __FRAMES__;
 const TILE_SECONDS = __TILE_SECONDS__;
+const GRANULE_DETAIL_MAX = __GRANULE_MAX__;
 const GRIDS  = __GRIDS__;
 
 /* ---------------------------------------------------------------- theme --- */
@@ -1520,9 +1557,9 @@ function renderTimeline(p) {
     const k = (perDate[d] = (perDate[d] || 0) + 1) - 1;
     const dup = p.duplicate_dates.includes(d);
     const cy = Y - k * 9;
-    return `<circle cx="${x(v).toFixed(1)}" cy="${cy}" r="4.5"
+    return `<circle cx="${x(v).toFixed(1)}" cy="${cy}" r="4"
        fill="${sensorColor(p.sensors[i])}"
-       stroke="${dup ? cssVar("--dup") : cssVar("--surface-1")}" stroke-width="2">
+       stroke="${dup ? cssVar("--dup") : cssVar("--surface-1")}" stroke-width="1">
        <title>${d} ${p.sensors[i]}${dup ? " (duplicate date)" : ""}</title></circle>`;
   }).join("");
 
@@ -1602,8 +1639,9 @@ function stacksChart(feature) {
     const y = 12 + i * ROW;
     const mine = g.key === own;
     const dots = g.acq.map(a =>
-      `<circle cx="${x(new Date(a.date).getTime()).toFixed(1)}" cy="${y}" r="4.5"
-         fill="${sensorColor(a.sensor)}" stroke="var(--surface-1)" stroke-width="1.5">
+      `<circle class="mk" cx="${x(new Date(a.date).getTime()).toFixed(1)}" cy="${y}" r="4"
+         fill="${sensorColor(a.sensor)}" stroke="var(--surface-1)" stroke-width="1"
+         data-label="${g.key} &middot; ${a.date} &middot; ${a.sensor}">
          <title>${g.key} - ${a.date} - ${a.sensor}</title></circle>`).join("");
     return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}"
               stroke="var(--border)" stroke-width="1"/>
@@ -1645,9 +1683,10 @@ function timeSeriesBody(feature) {
     const dup = p.duplicate_dates.includes(d);
     return `<line x1="${x(v).toFixed(1)}" y1="${BASE}" x2="${x(v).toFixed(1)}" y2="${cy}"
               stroke="var(--border)" stroke-width="2"/>
-            <circle cx="${x(v).toFixed(1)}" cy="${cy}" r="5.5"
+            <circle class="mk" cx="${x(v).toFixed(1)}" cy="${cy}" r="5"
               fill="${sensorColor(p.sensors[i])}"
-              stroke="${dup ? "var(--dup)" : "var(--surface-1)"}" stroke-width="2">
+              stroke="${dup ? "var(--dup)" : "var(--surface-1)"}" stroke-width="1"
+              data-label="${d} &middot; ${p.sensors[i]}${dup ? " &middot; duplicate date" : ""}">
               <title>${d} - ${p.sensors[i]}${dup ? " (duplicate date)" : ""}</title>
             </circle>`;
   }).join("");
@@ -1688,8 +1727,9 @@ function timeSeriesBody(feature) {
     const bars = gaps.map((g, i) => {
       const cx = PAD_L + step * (i + 0.5);
       const h = (B2 - 22) * (g.days / maxG);
-      return `<rect x="${(cx - bw / 2).toFixed(1)}" y="${(B2 - h).toFixed(1)}"
-                width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="var(--accent)">
+      return `<rect class="mk" x="${(cx - bw / 2).toFixed(1)}" y="${(B2 - h).toFixed(1)}"
+                width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="var(--accent)"
+                data-label="${g.days} days to ${g.to}">
                 <title>${g.to}: ${g.days} days after the previous pass</title></rect>
               <text class="ax" x="${cx.toFixed(1)}" y="${(B2 - h - 5).toFixed(1)}"
                 text-anchor="middle">${g.days}</text>`;
@@ -1713,7 +1753,7 @@ function timeSeriesBody(feature) {
       <td><i class="sw" style="background:${sensorColor(p.sensors[i])}"></i>${d}</td>
       <td>${p.sensors[i]}</td>
       <td class="r">${gap == null ? "first" : "+" + gap + " d"}</td>
-      <td class="g">${p.granules[i]}</td></tr>`;
+      <td class="g">${(p.granules || [])[i] || ""}</td></tr>`;
   }).join("");
 
   const warn = p.n_duplicate
@@ -1743,11 +1783,33 @@ ${chart1}
 ${chart2}
 ${stacksChart(feature)}
 <h3>All acquisitions</h3>
+${p.granules ? "" : `<p class="note">Granule names are left out above
+  ${GRANULE_DETAIL_MAX} acquisitions to keep this page small; the catalog has them.</p>`}
 <table class="acq"><thead><tr><th>Date</th><th>Sensor</th><th>Interval</th><th>Granule</th></tr></thead>
 <tbody>${rows}</tbody></table>
 <div class="grid">Pinned grid: ${km(p.width_m)} x ${km(p.height_m)} km &middot;
   footprint covers ${p.fill_pct}% of it, so ${p.nodata_pct}% is nodata in every product
   &middot; bbox ${p.bbox.join(" ")} in EPSG ${p.epsg}</div>`;
+}
+
+// An SVG <title> only appears after the browser's own delay and cannot be
+// styled; the charts are worth a proper hover layer, so every mark carries a
+// data-label and one tooltip follows the pointer.
+function attachPanelTooltips(panel) {
+  const tip = panel.querySelector("#fpanel-tip");
+  const body = panel.querySelector("#fpanel-body");
+
+  body.addEventListener("mousemove", ev => {
+    const mark = ev.target.closest(".mk");
+    if (!mark) { tip.hidden = true; return; }
+    tip.hidden = false;
+    tip.innerHTML = mark.dataset.label;
+    const box = panel.getBoundingClientRect();
+    const left = ev.clientX - box.left + 12;
+    tip.style.left = Math.min(left, box.width - tip.offsetWidth - 8) + "px";
+    tip.style.top = (ev.clientY - box.top - tip.offsetHeight - 10) + "px";
+  });
+  body.addEventListener("mouseleave", () => { tip.hidden = true; });
 }
 
 function openFramePanel(feature) {
@@ -1759,9 +1821,11 @@ function openFramePanel(feature) {
        <span class="t">${p.frame_id}</span>
        <button id="fpanel-close" title="Close" aria-label="Close">&times;</button>
      </div>
-     <div id="fpanel-body">${timeSeriesBody(feature)}</div>`;
+     <div id="fpanel-body">${timeSeriesBody(feature)}</div>
+     <div class="tip" id="fpanel-tip" hidden></div>`;
   panel.hidden = false;
   document.getElementById("fpanel-close").onclick = () => { panel.hidden = true; };
+  attachPanelTooltips(panel);
   dragBy(panel, document.getElementById("fpanel-head"));
 }
 

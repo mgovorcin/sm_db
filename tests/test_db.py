@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 from shapely.geometry import box
 
-from sm_db.db import read_frames, write_database
+from sm_db.db import read_acquisitions, read_frames, write_database
 from sm_db.frames import Frame
 
 
@@ -160,3 +160,44 @@ class TestFillPersisted:
             "SELECT burst_id_jpl FROM frames WHERE fill_pct >= 0"
         ).fetchall()
         assert len(rows) == 2
+
+
+class TestAcquisitionsTable:
+    def _acq(self):
+        return {
+            "t095_000003_s3": [
+                {"date": "2026-03-01", "platform": "S1C", "granule": "a"},
+                {"date": "2026-03-13", "platform": "S1A", "granule": "b"},
+            ]
+        }
+
+    def test_round_trips(self, tmp_path):
+        path = tmp_path / "f.sqlite3"
+        write_database(
+            [_frame()],
+            path,
+            tile_seconds=5.0,
+            margin=0.0,
+            snap=30.0,
+            acquisitions=self._acq(),
+        )
+        got = read_acquisitions(path)
+        assert [a["date"] for a in got["t095_000003_s3"]] == [
+            "2026-03-01",
+            "2026-03-13",
+        ]
+        assert got["t095_000003_s3"][1]["platform"] == "S1A"
+
+    def test_empty_when_none_were_given(self, database):
+        assert read_acquisitions(database) == {}
+
+    def test_absent_table_is_not_an_error(self, tmp_path):
+        """Databases built before this table must still be readable."""
+        import sqlite3
+
+        path = tmp_path / "old.sqlite3"
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE something (x INTEGER)")
+        con.commit()
+        con.close()
+        assert read_acquisitions(path) == {}

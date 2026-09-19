@@ -29,7 +29,12 @@ from shapely import wkt
 
 from sm_db.frames import Frame
 
-__all__ = ["BURST_ID_MAP_SCHEMA", "read_frames", "write_database"]
+__all__ = [
+    "BURST_ID_MAP_SCHEMA",
+    "read_acquisitions",
+    "read_frames",
+    "write_database",
+]
 
 BURST_ID_MAP_SCHEMA = """
 CREATE TABLE burst_id_map (
@@ -57,6 +62,15 @@ CREATE TABLE frames (
 )
 """
 
+_ACQUISITIONS_SCHEMA = """
+CREATE TABLE acquisitions (
+    burst_id_jpl TEXT NOT NULL REFERENCES burst_id_map(burst_id_jpl),
+    date         TEXT NOT NULL,
+    sensor       TEXT NOT NULL,
+    granule      TEXT NOT NULL
+)
+"""
+
 _METADATA_SCHEMA = """
 CREATE TABLE metadata (
     key   TEXT PRIMARY KEY,
@@ -72,6 +86,7 @@ def write_database(
     margin: float,
     snap: float,
     extra: dict[str, object] | None = None,
+    acquisitions: dict[str, list[dict]] | None = None,
 ) -> int:
     """Write frames to a sqlite database COMPASS can read.
 
@@ -89,6 +104,10 @@ def write_database(
         back to how it was made.
     extra :
         Further key/value pairs for ``metadata``.
+    acquisitions :
+        What was observed, keyed by frame ID. Recording it here means the map can
+        be redrawn, and coverage questioned, without re-deriving frames from every
+        granule in the catalog -- half an hour's work for a full archive.
 
     Returns
     -------
@@ -103,6 +122,7 @@ def write_database(
     with sqlite3.connect(path) as con:
         con.execute(BURST_ID_MAP_SCHEMA)
         con.execute(_FRAMES_SCHEMA)
+        con.execute(_ACQUISITIONS_SCHEMA)
         con.execute(_METADATA_SCHEMA)
 
         con.executemany(
@@ -134,6 +154,17 @@ def write_database(
                 for f in ordered
             ],
         )
+
+        con.executemany(
+            "INSERT INTO acquisitions (burst_id_jpl, date, sensor, granule) "
+            "VALUES (?, ?, ?, ?)",
+            [
+                (frame_id, a["date"], a["platform"], a["granule"])
+                for frame_id, entries in (acquisitions or {}).items()
+                for a in entries
+            ],
+        )
+        con.execute("CREATE INDEX acquisitions_frame ON acquisitions (burst_id_jpl)")
 
         meta: dict[str, object] = {
             "tile_seconds": tile_seconds,
@@ -205,3 +236,36 @@ def read_frames(
         )
         for r in rows
     ]
+
+
+def read_acquisitions(path: str | Path) -> dict[str, list[dict]]:
+    """Read what was observed, keyed by frame ID.
+
+    Parameters
+    ----------
+    path :
+        Database file.
+
+    Returns
+    -------
+    dict
+        Frame ID to a list of ``{"date", "platform", "granule"}``, oldest first.
+        Empty when the database predates this table.
+    """
+    with sqlite3.connect(path) as con:
+        table = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='acquisitions'"
+        ).fetchone()
+        if not table:
+            return {}
+        rows = con.execute(
+            "SELECT burst_id_jpl, date, sensor, granule FROM acquisitions "
+            "ORDER BY burst_id_jpl, date"
+        ).fetchall()
+
+    out: dict[str, list[dict]] = {}
+    for frame_id, date, sensor, granule in rows:
+        out.setdefault(frame_id, []).append(
+            {"date": date, "platform": sensor, "granule": granule}
+        )
+    return out

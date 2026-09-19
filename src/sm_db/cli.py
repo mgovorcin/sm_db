@@ -186,6 +186,7 @@ def build(
 
     orbits = OrbitLookup(orbit_dir)
     defined: dict[str, Frame] = {}
+    covered: list[tuple] = []
     skipped: list[str] = []
 
     with click.progressbar(granules, label="Defining frames") as bar:
@@ -210,10 +211,13 @@ def build(
             if not found:
                 skipped.append(f"{granule.name}: too short to fill a frame")
             found = [f for f in found if f.fill_pct >= min_fill]
+            covered.append((granule, [f.frame_id for f in found]))
             defined = merge_frames(defined, found)
 
     for message in skipped:
         click.echo(f"  skipped {message}", err=True)
+
+    from sm_db.viewer import frame_acquisitions
 
     n = db_mod.write_database(
         defined.values(),
@@ -221,6 +225,7 @@ def build(
         tile_seconds=tile_seconds,
         margin=margin,
         snap=snap,
+        acquisitions=frame_acquisitions(covered),
         extra={
             "start": start,
             "end": end,
@@ -667,12 +672,14 @@ def update(
     if skipped:
         click.echo(f"  skipped {skipped} granule(s) with no orbit available", err=True)
 
+    observed = frame_acquisitions(covered)
     n = db_mod.write_database(
         defined.values(),
         output,
         tile_seconds=tile_seconds,
         margin=margin,
         snap=snap,
+        acquisitions=observed,
         extra={
             "start": start,
             "end": end,
@@ -690,7 +697,7 @@ def update(
     write_viewer(
         defined.values(),
         viewer,
-        acquisitions=frame_acquisitions(covered),
+        acquisitions=observed,
         subtitle=f"{n} frames from {len(everything)} acquisitions",
         tile_seconds=tile_seconds,
     )
@@ -734,7 +741,11 @@ def viewer_cmd(
     from sm_db.viewer import frame_acquisitions, write_viewer
 
     frames = db_mod.read_frames(database)
-    acquisitions = None
+    # The database carries what was observed, so redrawing the map is a read
+    # rather than half an hour of re-deriving frames from every granule.
+    acquisitions = db_mod.read_acquisitions(database) or None
+    if acquisitions:
+        click.echo(f"Read acquisitions for {len(acquisitions)} frames from {database}")
 
     if catalog:
         if orbit_dir is None:
