@@ -440,18 +440,25 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
     one snap cell of rounding. The default tolerance sits well above that and
     far below the bbox margin, so it stays quiet for real repeats while catching
     the kilometre-scale divergence that means the database no longer describes
-    the data. Exits non-zero when anything is reported.
+    the data. Exits non-zero only on a real disagreement; granules whose orbit is
+    not available are counted as unverified, not as failures.
     """
     stored = {f.frame_id: f for f in db_mod.read_frames(database)}
     orbits = OrbitLookup(orbit_dir)
     problems = []
+    verified = 0
+    unverifiable = 0
 
     for granule in granules_mod.load_catalog(catalog):
-        try:
-            orbit = orbits.find(granule)
-        except FileNotFoundError as exc:
-            problems.append(str(exc))
+        # A granule whose orbit is not on hand cannot be checked, which is not
+        # the same as a granule that disagrees. Counting the two together made a
+        # CI run -- which caches only recent orbits, deliberately -- report the
+        # whole archive as broken.
+        if not orbits.covers(granule):
+            unverifiable += 1
             continue
+        orbit = orbits.find(granule)
+        verified += 1
 
         for frame in frames_for_granule(granule, orbit):
             known = stored.get(frame.frame_id)
@@ -475,7 +482,16 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
 
     for message in problems:
         click.echo(message, err=True)
-    click.echo(f"{len(stored)} frames checked, {len(problems)} problem(s)")
+
+    click.echo(
+        f"{len(stored)} frames in the database; "
+        f"{verified} granule(s) verified, {len(problems)} problem(s)"
+    )
+    if unverifiable:
+        click.echo(
+            f"{unverifiable} granule(s) could not be checked: no orbit on hand. "
+            "That is expected where orbits are fetched only for new acquisitions."
+        )
     if problems:
         sys.exit(1)
 

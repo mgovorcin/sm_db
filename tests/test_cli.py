@@ -269,3 +269,57 @@ class TestIncrementalUpdate:
             acquisitions=merged,
         )
         assert len(read_acquisitions(path)["t095_000003_s3"]) == 2
+
+
+class TestCheckWithoutOrbits:
+    """A missing orbit means "not checked", never "broken".
+
+    Regression: a CI run caches orbits only for new acquisitions, so `check`
+    counted 18,874 unavailable orbits as problems and failed the whole job.
+    """
+
+    def _setup(self, tmp_path, granule):
+        from sm_db.granules import save_catalog
+
+        catalog = tmp_path / "catalog.json"
+        save_catalog([granule], catalog)
+        orbits = tmp_path / "orbits"
+        orbits.mkdir()
+        database = tmp_path / "frames.sqlite3"
+        write_database([_frame()], database, tile_seconds=5.0, margin=5000.0, snap=30.0)
+        return catalog, orbits, database
+
+    def test_missing_orbit_does_not_fail_the_run(self, runner, tmp_path, granule):
+        catalog, orbits, database = self._setup(tmp_path, granule)
+        result = runner.invoke(
+            runner_cli := cli,
+            [
+                "check",
+                "--catalog",
+                str(catalog),
+                "--orbit-dir",
+                str(orbits),
+                "-d",
+                str(database),
+            ],
+        )
+        assert runner_cli is cli
+        assert result.exit_code == 0
+        assert "could not be checked" in result.output
+
+    def test_it_says_how_many_went_unverified(self, runner, tmp_path, granule):
+        catalog, orbits, database = self._setup(tmp_path, granule)
+        result = runner.invoke(
+            cli,
+            [
+                "check",
+                "--catalog",
+                str(catalog),
+                "--orbit-dir",
+                str(orbits),
+                "-d",
+                str(database),
+            ],
+        )
+        assert "1 granule(s) could not be checked" in result.output
+        assert "0 problem(s)" in result.output
