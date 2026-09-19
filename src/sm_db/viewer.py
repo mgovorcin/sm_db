@@ -1411,15 +1411,28 @@ function renderList(shown) {
 function renderDaily(shown) {
   const host = document.getElementById("daily");
   const tip = document.getElementById("daily-tip");
-  const counts = new Map();
+  const kept = [];
   for (const f of shown) {
     for (const d of f.properties.dates) {
       if (state.d0 && d < state.d0) continue;
       if (state.d1 && d > state.d1) continue;
-      counts.set(d, (counts.get(d) || 0) + 1);
+      kept.push(d);
     }
   }
+  // Bin to whatever keeps the bars apart: a day each over a month, a month each
+  // over a few years, a year each over the whole archive.
+  const spanDays = kept.length
+    ? (new Date(kept.reduce((a, b) => (a > b ? a : b))) -
+       new Date(kept.reduce((a, b) => (a < b ? a : b)))) / 86400000
+    : 0;
+  const cut = spanDays > 1460 ? 4 : spanDays > 120 ? 7 : 10;
+  const counts = new Map();
+  for (const d of kept) {
+    const key = d.slice(0, cut);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
   const days = [...counts.keys()].sort();
+  const unit = cut === 4 ? "year" : cut === 7 ? "month" : "day";
   host.querySelectorAll("svg").forEach(n => n.remove());
   if (!days.length) {
     host.insertAdjacentHTML("afterbegin",
@@ -1430,21 +1443,20 @@ function renderDaily(shown) {
 
   const W = 298, H = 88, PAD_B = 14, PAD_L = 20;
   const max = Math.max(...counts.values());
-  const first = new Date(days[0]), last = new Date(days[days.length - 1]);
-  const span = Math.max(1, (last - first) / 86400000);
   const plotW = W - PAD_L - 2;
+  const step = plotW / days.length;
   // 2px surface gap between adjacent bars, per the mark spec.
-  const bw = Math.max(1.5, Math.min(9, plotW / (span + 1) - 2));
+  const bw = Math.max(1.5, Math.min(12, step - 2));
 
-  const bars = days.map(d => {
-    const x = PAD_L + ((new Date(d) - first) / 86400000) * (plotW / span);
+  const bars = days.map((d, i) => {
+    const x = PAD_L + step * (i + 0.5);
     const h = ((H - PAD_B) * counts.get(d)) / max;
     return `<rect class="bar" x="${(x - bw / 2).toFixed(1)}" y="${(H - PAD_B - h).toFixed(1)}"
       width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="${Math.min(2, bw / 2).toFixed(1)}"
       data-d="${d}" data-n="${counts.get(d)}"></rect>`;
   }).join("");
 
-  const fmt = s => s.slice(5).replace("-", "/");
+  const fmt = s => (cut === 4 ? s : s.slice(2));
   host.insertAdjacentHTML("afterbegin", `<svg viewBox="0 0 ${W} ${H}" role="img"
       aria-label="Acquisitions per day">
     <line class="gridline" x1="${PAD_L}" y1="${H - PAD_B}" x2="${W}" y2="${H - PAD_B}"></line>
@@ -1507,7 +1519,7 @@ function select(frameId, openWindow) {
     <div class="dates">${p.dates.map((d, i) => {
       const gap = i ? (new Date(d) - new Date(p.dates[i - 1])) / 86400000 : null;
       const dup = p.duplicate_dates.includes(d);
-      return `<div class="${dup ? "dup" : ""}" title="${p.granules[i]}">
+      return `<div class="${dup ? "dup" : ""}" title="${(p.granules || [])[i] || p.frame_id}">
         <i style="background:${sensorColor(p.sensors[i])}"></i>
         <span>${d}</span>
         <span class="sensor">${p.sensors[i]}</span>
@@ -1535,6 +1547,68 @@ function select(frameId, openWindow) {
   }
 }
 
+// Dots read well until they touch. A frame imaged 546 times over twelve years
+// puts one every half pixel, which is a solid bar and tells you nothing, so past
+// a threshold the same data is binned and stacked by sensor instead: the shape of
+// the record survives and the sensor mix becomes visible rather than overplotted.
+const DOTS_MAX_SIDEBAR = 40;
+const DOTS_MAX_PANEL = 60;
+
+function binAcquisitions(dates, sensors) {
+  const t = dates.map(d => new Date(d).getTime());
+  const spanDays = (Math.max(...t) - Math.min(...t)) / 86400000;
+  const byYear = spanDays > 730;
+
+  const bins = new Map();
+  dates.forEach((d, i) => {
+    const key = byYear ? d.slice(0, 4) : d.slice(0, 7);
+    if (!bins.has(key)) bins.set(key, { key, total: 0, bySensor: {} });
+    const b = bins.get(key);
+    b.total += 1;
+    b.bySensor[sensors[i]] = (b.bySensor[sensors[i]] || 0) + 1;
+  });
+  return { bins: [...bins.values()].sort((a, b) => a.key.localeCompare(b.key)), byYear };
+}
+
+function stackedBarsSvg(dates, sensors, W, H, padLeft) {
+  const { bins, byYear } = binAcquisitions(dates, sensors);
+  const PAD_L = padLeft, PAD_R = 6, BASE = H - 15;
+  const plotW = W - PAD_L - PAD_R;
+  const max = Math.max(...bins.map(b => b.total));
+  const step = plotW / bins.length;
+  const bw = Math.max(3, Math.min(30, step - 2));   // 2px surface gap between bars
+  const order = [...new Set(sensors)].sort();
+
+  const bars = bins.map((b, i) => {
+    const cx = PAD_L + step * (i + 0.5);
+    let y = BASE;
+    const parts = order.filter(sn => b.bySensor[sn]).map(sn => {
+      const h = (BASE - 12) * (b.bySensor[sn] / max);
+      y -= h;
+      return `<rect class="mk" x="${(cx - bw / 2).toFixed(1)}" y="${(y + 1).toFixed(1)}"
+        width="${bw.toFixed(1)}" height="${Math.max(0, h - 1).toFixed(1)}" rx="1.5"
+        fill="${sensorColor(sn)}"
+        data-label="${b.key} &middot; ${sn} &middot; ${b.bySensor[sn]}"><title>${b.key} ${sn}: ${b.bySensor[sn]}</title></rect>`;
+    }).join("");
+    return parts;
+  }).join("");
+
+  const every = Math.ceil(bins.length / 6);
+  const labels = bins.map((b, i) =>
+    i % every === 0
+      ? `<text class="ax axis" x="${(PAD_L + step * (i + 0.5)).toFixed(1)}" y="${H - 3}"
+           text-anchor="middle">${byYear ? b.key : b.key.slice(2)}</text>`
+      : "").join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="Acquisitions per ${byYear ? "year" : "month"} by sensor">
+    <line class="gridline" x1="${PAD_L}" y1="${BASE}" x2="${W - PAD_R}" y2="${BASE}"></line>
+    <text class="ax axis" x="0" y="11">${max}</text>
+    <text class="ax axis" x="0" y="${BASE}">0</text>
+    ${bars}${labels}
+  </svg>`;
+}
+
 // A one-row strip: with a handful of passes the question is where the gaps are
 // and which sensor flew them, which a dot plot on a real time axis answers and a
 // bar chart does not. Colour carries the sensor, but never alone -- every dot is
@@ -1542,6 +1616,16 @@ function select(frameId, openWindow) {
 function renderTimeline(p) {
   const host = document.getElementById("ts");
   if (!p.dates.length) { host.innerHTML = ""; return; }
+
+  const legend = `<div class="legend" style="margin-top:2px;">${
+    [...new Set(p.sensors)].sort().map(sname =>
+      `<div><i style="background:${sensorColor(sname)}"></i>${sname}</div>`).join("")
+  }</div>`;
+
+  if (p.dates.length > DOTS_MAX_SIDEBAR) {
+    host.innerHTML = stackedBarsSvg(p.dates, p.sensors, 298, 74, 22) + legend;
+    return;
+  }
 
   const W = 298, H = 46, PAD = 10, Y = 17;
   const t = p.dates.map(d => new Date(d).getTime());
@@ -1569,11 +1653,7 @@ function renderTimeline(p) {
     ${dots}
     <text class="axis" x="${PAD}" y="${H - 2}">${p.first}</text>
     <text class="axis" x="${W - PAD}" y="${H - 2}" text-anchor="end">${p.last}</text>
-  </svg>
-  <div class="legend" style="margin-top:2px;">${
-    [...new Set(p.sensors)].sort().map(sname =>
-      `<div><i style="background:${sensorColor(sname)}"></i>${sname}</div>`).join("")
-  }</div>`;
+  </svg>` + legend;
 }
 
 /* --------------------------------------------------- frame time series --- */
@@ -1630,7 +1710,7 @@ function stacksChart(feature) {
   const lo = Math.min(...all), hi = Math.max(...all);
   const span = Math.max(1, hi - lo);
 
-  const W = 760, PAD_L = 92, PAD_R = 20, ROW = 22;
+  const W = 760, PAD_L = 92, PAD_R = 20, ROW = 24;
   const plotW = W - PAD_L - PAD_R;
   const x = v => PAD_L + ((v - lo) / span) * plotW;
   const H = groups.length * ROW + 26;
@@ -1638,11 +1718,19 @@ function stacksChart(feature) {
   const rows = groups.map((g, i) => {
     const y = 12 + i * ROW;
     const mine = g.key === own;
-    const dots = g.acq.map(a =>
-      `<circle class="mk" cx="${x(new Date(a.date).getTime()).toFixed(1)}" cy="${y}" r="4"
-         fill="${sensorColor(a.sensor)}" stroke="var(--surface-1)" stroke-width="1"
-         data-label="${g.key} &middot; ${a.date} &middot; ${a.sensor}">
-         <title>${g.key} - ${a.date} - ${a.sensor}</title></circle>`).join("");
+    // Hundreds of passes on one row overplot into a smear; draw them as ticks,
+    // which stay legible as a density and keep the sensor colour readable.
+    const dense = g.acq.length > 60;
+    const dots = g.acq.map(a => {
+      const cx = x(new Date(a.date).getTime()).toFixed(1);
+      return dense
+        ? `<line class="mk" x1="${cx}" y1="${y - 6}" x2="${cx}" y2="${y + 6}"
+             stroke="${sensorColor(a.sensor)}" stroke-width="1.5"
+             data-label="${g.key} &middot; ${a.date} &middot; ${a.sensor}"></line>`
+        : `<circle class="mk" cx="${cx}" cy="${y}" r="4"
+             fill="${sensorColor(a.sensor)}" stroke="var(--surface-1)" stroke-width="1"
+             data-label="${g.key} &middot; ${a.date} &middot; ${a.sensor}"></circle>`;
+    }).join("");
     return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}"
               stroke="var(--border)" stroke-width="1"/>
             <text class="ax" x="${PAD_L - 8}" y="${y + 3}" text-anchor="end"
@@ -1705,7 +1793,9 @@ function timeSeriesBody(feature) {
     }
   }
 
-  const chart1 = `<svg viewBox="0 0 ${W} ${H1}" role="img" aria-label="Acquisition dates by sensor">
+  const chart1 = p.dates.length > DOTS_MAX_PANEL
+    ? stackedBarsSvg(p.dates, p.sensors, W, 150, PAD_L)
+    : `<svg viewBox="0 0 ${W} ${H1}" role="img" aria-label="Acquisition dates by sensor">
     ${ticks.join("")}
     <line x1="${PAD_L}" y1="${BASE}" x2="${W - PAD_R}" y2="${BASE}" stroke="var(--border)"/>
     ${stems}
@@ -1719,7 +1809,40 @@ function timeSeriesBody(feature) {
     to: d, days: Math.round((new Date(d) - new Date(uniq[i])) / 86400000)
   }));
   let chart2 = `<p class="note">Only one date, so there is no interval to plot.</p>`;
-  if (gaps.length) {
+  if (gaps.length > 60) {
+    // One bar per interval becomes a solid band. What the question really is at
+    // this length is whether the cadence is regular, which a histogram of the
+    // interval lengths answers: a repeat-pass record is one tall spike plus a
+    // tail of gaps where acquisitions were missed.
+    const H2 = 140, B2 = 104, PAD_R = 20;
+    const plotW = W - PAD_L - PAD_R;
+    const tally = new Map();
+    for (const g of gaps) tally.set(g.days, (tally.get(g.days) || 0) + 1);
+    const lens = [...tally.keys()].sort((a, b) => a - b);
+    const max = Math.max(...tally.values());
+    const step = plotW / lens.length;
+    const bw = Math.max(3, Math.min(26, step - 2));
+    const bars = lens.map((d, i) => {
+      const cx = PAD_L + step * (i + 0.5);
+      const h = (B2 - 22) * (tally.get(d) / max);
+      return `<rect class="mk" x="${(cx - bw / 2).toFixed(1)}" y="${(B2 - h).toFixed(1)}"
+                width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="var(--accent)"
+                data-label="${tally.get(d)} interval${tally.get(d) === 1 ? "" : "s"} of ${d} days">
+                <title>${d} days: ${tally.get(d)}</title></rect>
+              ${bw >= 12 ? `<text class="ax" x="${cx.toFixed(1)}" y="${B2 + 12}"
+                 text-anchor="middle">${d}</text>` : ""}`;
+    }).join("");
+    const median = [...gaps.map(g => g.days)].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+    chart2 = `<svg viewBox="0 0 ${W} ${H2}" role="img"
+        aria-label="How often each interval length occurs">
+      <line x1="${PAD_L}" y1="${B2}" x2="${W - PAD_R}" y2="${B2}" stroke="var(--border)"/>
+      <text class="ax" x="6" y="22">${max}</text>
+      <text class="ax" x="6" y="${B2}">0</text>
+      ${bars}
+      <text class="ax" x="${PAD_L}" y="${H2 - 6}">interval length in days &middot;
+        ${gaps.length} intervals, median ${median} d</text>
+    </svg>`;
+  } else if (gaps.length) {
     const H2 = 132, B2 = 98;
     const maxG = Math.max(...gaps.map(g => g.days));
     const step = plotW / gaps.length;
@@ -1731,15 +1854,19 @@ function timeSeriesBody(feature) {
                 width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="var(--accent)"
                 data-label="${g.days} days to ${g.to}">
                 <title>${g.to}: ${g.days} days after the previous pass</title></rect>
-              <text class="ax" x="${cx.toFixed(1)}" y="${(B2 - h - 5).toFixed(1)}"
-                text-anchor="middle">${g.days}</text>`;
+              ${bw >= 14
+                ? `<text class="ax" x="${cx.toFixed(1)}" y="${(B2 - h - 5).toFixed(1)}"
+                     text-anchor="middle">${g.days}</text>`
+                : ""}`;
     }).join("");
     chart2 = `<svg viewBox="0 0 ${W} ${H2}" role="img" aria-label="Days between consecutive passes">
       <line x1="${PAD_L}" y1="${B2}" x2="${W - PAD_R}" y2="${B2}" stroke="var(--border)"/>
       <text class="ax" x="6" y="22">${maxG} d</text>
       <text class="ax" x="6" y="${B2}">0</text>
       ${bars}
-      <text class="ax" x="${PAD_L}" y="${B2 + 20}">interval to each later pass, in days</text>
+      <text class="ax" x="${PAD_L}" y="${B2 + 20}">interval to each later pass, in days${
+        bw >= 14 ? "" : ` &mdash; ${gaps.length} intervals, median ${
+          [...gaps.map(g => g.days)].sort((a, b) => a - b)[Math.floor(gaps.length / 2)]} d`}</text>
     </svg>`;
   }
 
