@@ -7,25 +7,35 @@ width was measured from whichever acquisition happened to define it first. So th
 area valid in *every* date, which is all a time series can use, is the
 intersection of the acquisitions rather than the frame itself.
 
-This measures that intersection, and answers the question it raises: when a
-handful of passes are narrower than the rest, is it better to drop them and keep
-the area, or keep them and lose it? The trade is real either way, so the job here
-is to quantify it rather than to pick.
+Measured by sampling rather than by intersecting polygons. That is not a
+shortcut: a frame and a granule footprint are both convex quadrilaterals, so
+their intersection is convex and every successive intersection should stay a
+single polygon -- but in floating point, intersecting hundreds of nearly
+identical quads accumulates sliver vertices (1,895 after fifty steps on a real
+frame) until the result fragments into a MultiPolygon, which is geometrically
+impossible for convex inputs. Snapping to a grid made it worse. Sampling is
+immune to all of it, costs under a second for the densest frame in the archive,
+and agrees to 0.1 percent across grid resolutions from 100 to 300.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
-from pyproj import Transformer
+import numpy as np
+import shapely
 from shapely.geometry import Polygon
-from shapely.ops import transform
 
-from sm_db.frames import Frame
-from sm_db.granules import Granule
+__all__ = ["DEFAULT_GRID", "FrameCoverage", "frame_coverage"]
 
-__all__ = ["FrameCoverage", "drop_curve", "frame_coverage"]
+DEFAULT_GRID = 100
+"""Samples per side across a frame's bounding box.
+
+A frame is around 96 by 60 km, so this is roughly a kilometre between samples and
+resolves a coverage fraction to a few tenths of a percent -- far finer than the
+differences between acquisitions, which are themselves under one percent.
+"""
 
 
 @dataclass
@@ -36,19 +46,30 @@ class FrameCoverage:
     ----------
     frame_id :
         The frame measured.
-    n_acquisitions :
-        How many acquisitions were considered.
     per_granule :
         Fraction of the frame each acquisition covers, keyed by granule name.
     common :
-        Fraction of the frame covered by *every* acquisition -- the area a stack
-        can use without a nodata hole on some date.
+        Fraction covered by *every* acquisition -- the area a stack can use
+        without a nodata hole on some date.
     """
 
     frame_id: str
-    n_acquisitions: int
     per_granule: dict[str, float] = field(default_factory=dict)
     common: float = 0.0
+
+    @property
+    def n_acquisitions(self) -> int:
+        """How many acquisitions were measured."""
+        return len(self.per_granule)
+
+    @property
+    def typical(self) -> float:
+        """Median coverage across the acquisitions."""
+        return (
+            float(np.median(list(self.per_granule.values())))
+            if self.per_granule
+            else 0.0
+        )
 
     @property
     def worst(self) -> tuple[str, float] | None:
@@ -58,75 +79,65 @@ class FrameCoverage:
         name = min(self.per_granule, key=lambda k: self.per_granule[k])
         return name, self.per_granule[name]
 
+    @property
+    def cost_of_worst(self) -> float:
+        """How much area the poorest dates take off the typical one.
+
+        Near zero means the bounds are effectively fixed; a large value means a
+        few dates are holding the whole stack back and are worth dropping.
+        """
+        return round(self.typical - self.common, 4)
+
     def below(self, threshold: float) -> list[str]:
         """Granules covering less than `threshold` of the frame, worst first."""
         poor = [g for g, v in self.per_granule.items() if v < threshold]
         return sorted(poor, key=lambda g: self.per_granule[g])
 
 
-def _project(polygon: Polygon, epsg: int) -> Polygon:
-    """Project a lon/lat polygon into `epsg`."""
-    tf = Transformer.from_crs(4326, epsg, always_xy=True)
-    return transform(lambda x, y: tf.transform(x, y), polygon)
-
-
-def frame_coverage(frame: Frame, granules: Iterable[Granule]) -> FrameCoverage:
+def frame_coverage(
+    frame_polygon: Polygon,
+    footprints: Sequence[Polygon],
+    names: Iterable[str],
+    frame_id: str = "",
+    grid: int = DEFAULT_GRID,
+) -> FrameCoverage:
     """Measure what each acquisition contributes to one frame.
 
     Parameters
     ----------
-    frame :
-        The frame to measure.
-    granules :
-        The acquisitions covering it.
+    frame_polygon :
+        The frame, in lon/lat degrees.
+    footprints :
+        Acquisition footprints in the same coordinates.
+    names :
+        Granule names, parallel to `footprints`.
+    frame_id :
+        Recorded on the result.
+    grid :
+        Samples per side; see `DEFAULT_GRID`.
 
     Returns
     -------
     FrameCoverage
     """
-    shape = _project(frame.polygon, frame.epsg)
-    area = shape.area
-    out = FrameCoverage(frame_id=frame.frame_id, n_acquisitions=0)
-    if area <= 0:
+    out = FrameCoverage(frame_id=frame_id)
+    if not footprints:
         return out
 
-    common: Polygon | None = None
-    for granule in granules:
-        clipped = shape.intersection(_project(granule.footprint, frame.epsg))
-        out.per_granule[granule.name] = round(clipped.area / area, 4)
-        out.n_acquisitions += 1
-        common = clipped if common is None else common.intersection(clipped)
+    x0, y0, x1, y1 = frame_polygon.bounds
+    gx, gy = np.meshgrid(np.linspace(x0, x1, grid), np.linspace(y0, y1, grid))
+    x, y = gx.ravel(), gy.ravel()
 
-    out.common = round(common.area / area, 4) if common is not None else 0.0
+    inside = shapely.contains_xy(frame_polygon, x, y)
+    if not inside.any():
+        return out
+    x, y = x[inside], y[inside]
+
+    everywhere = np.ones(x.size, dtype=bool)
+    for name, footprint in zip(names, footprints, strict=True):
+        hit = shapely.contains_xy(footprint, x, y)
+        out.per_granule[name] = round(float(hit.mean()), 4)
+        everywhere &= hit
+
+    out.common = round(float(everywhere.mean()), 4)
     return out
-
-
-def drop_curve(coverage: FrameCoverage, max_drop: int = 5) -> list[tuple[int, float]]:
-    """Show what dropping the worst acquisitions would buy.
-
-    The common area is bounded by the narrowest pass, so removing the narrowest
-    can only raise it. This lists that trade: how many acquisitions are given up,
-    and the fraction of the frame the rest still share.
-
-    It is an upper bound rather than an exact recomputation -- the true
-    intersection of the survivors needs the geometry again -- but it is the right
-    shape for deciding, because the binding constraint is the worst pass.
-
-    Parameters
-    ----------
-    coverage :
-        A measured frame.
-    max_drop :
-        How far down the list to go.
-
-    Returns
-    -------
-    list of tuple
-        ``(dropped, best_possible_common)`` for 0 to `max_drop` acquisitions.
-    """
-    ordered = sorted(coverage.per_granule.values())
-    curve = []
-    for k in range(min(max_drop, max(len(ordered) - 1, 0)) + 1):
-        remaining = ordered[k:]
-        curve.append((k, round(min(remaining), 4) if remaining else 0.0))
-    return curve

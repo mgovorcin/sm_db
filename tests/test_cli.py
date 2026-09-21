@@ -417,3 +417,37 @@ class TestStaleFrames:
             existing, {}, [["t095_000003_s3", "t095_000004_s3"]], set()
         )
         assert stale == set()
+
+
+class TestCoverageSummary:
+    """Regression: the summary read a key the report no longer carries.
+
+    It only surfaced once a frame fell below the threshold, which none did
+    until frames were widened past a single acquisition.
+    """
+
+    def _report(self, **frames):
+        return {
+            fid: {
+                "common": c,
+                "typical": t,
+                "n_acquisitions": 5,
+                "cost_of_worst": t - c,
+            }
+            for fid, (c, t) in frames.items()
+        }
+
+    def test_frames_below_the_threshold_do_not_crash_it(self, capsys):
+        from sm_db.cli import _summarise_coverage
+
+        _summarise_coverage(self._report(a=(0.5, 0.95), b=(0.4, 0.6)), 0.9)
+        out = capsys.readouterr().out
+        assert "frames below" in out
+
+    def test_separates_a_few_bad_dates_from_a_frame_too_long(self, capsys):
+        from sm_db.cli import _summarise_coverage
+
+        _summarise_coverage(self._report(a=(0.5, 0.95), b=(0.4, 0.6)), 0.9)
+        out = capsys.readouterr().out
+        assert "hold the stack back :    1" in out
+        assert "one acquisition covers      :    1" in out

@@ -32,7 +32,9 @@ from sm_db.frames import Frame
 __all__ = [
     "BURST_ID_MAP_SCHEMA",
     "read_acquisitions",
+    "read_coverage",
     "read_frames",
+    "write_coverage",
     "write_database",
 ]
 
@@ -269,3 +271,82 @@ def read_acquisitions(path: str | Path) -> dict[str, list[dict]]:
             {"date": date, "platform": sensor, "granule": granule}
         )
     return out
+
+
+_COVERAGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS coverage (
+    burst_id_jpl TEXT PRIMARY KEY REFERENCES burst_id_map(burst_id_jpl),
+    n_measured   INTEGER NOT NULL,
+    common       REAL NOT NULL,
+    typical      REAL NOT NULL,
+    worst        REAL NOT NULL
+)
+"""
+
+
+def write_coverage(path: str | Path, report: dict[str, dict]) -> int:
+    """Store measured coverage alongside the frames.
+
+    Measuring is the expensive part -- every acquisition of every frame -- so the
+    result is kept, and the map and the GIS export read it rather than repeating
+    the work. Written into the existing database rather than replacing it, since
+    the frames themselves are untouched.
+
+    Parameters
+    ----------
+    path :
+        Database file.
+    report :
+        Per-frame results, keyed by frame ID, as ``sm-db coverage`` produces.
+
+    Returns
+    -------
+    int
+        Number of frames recorded.
+    """
+    rows = [
+        (
+            frame_id,
+            r["n_acquisitions"],
+            r["common"],
+            r["typical"],
+            (r["worst"] or ("", 0.0))[1],
+        )
+        for frame_id, r in report.items()
+    ]
+    with sqlite3.connect(path) as con:
+        con.execute(_COVERAGE_SCHEMA)
+        con.execute("DELETE FROM coverage")
+        con.executemany(
+            "INSERT INTO coverage "
+            "(burst_id_jpl, n_measured, common, typical, worst) VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+    return len(rows)
+
+
+def read_coverage(path: str | Path) -> dict[str, dict]:
+    """Read stored coverage, or an empty mapping when none was measured.
+
+    Parameters
+    ----------
+    path :
+        Database file.
+
+    Returns
+    -------
+    dict
+        Frame ID to ``{"n_measured", "common", "typical", "worst"}``.
+    """
+    with sqlite3.connect(path) as con:
+        if not con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='coverage'"
+        ).fetchone():
+            return {}
+        rows = con.execute(
+            "SELECT burst_id_jpl, n_measured, common, typical, worst FROM coverage"
+        ).fetchall()
+    return {
+        r[0]: {"n_measured": r[1], "common": r[2], "typical": r[3], "worst": r[4]}
+        for r in rows
+    }

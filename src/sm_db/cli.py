@@ -12,6 +12,7 @@ import click
 
 from sm_db import db as db_mod
 from sm_db import granules as granules_mod
+from sm_db.coverage import DEFAULT_GRID
 from sm_db.frames import Frame, OrbitLookup, frames_for_granule, merge_frames
 from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP
 from sm_db.granules import SM_BEAM_MODES
@@ -1064,6 +1065,18 @@ def export(output: Path, grids: bool, database: Path) -> None:
         geometry=shapes,
         crs="EPSG:4326",
     )
+
+    # Measured coverage, when `sm-db coverage --store` has been run. Shapefile
+    # field names are capped at ten characters, hence the abbreviations.
+    measured = db_mod.read_coverage(database)
+    if measured:
+        frame["n_acq"] = [
+            measured.get(f.frame_id, {}).get("n_measured") for f in frames
+        ]
+        frame["common"] = [measured.get(f.frame_id, {}).get("common") for f in frames]
+        frame["typical"] = [measured.get(f.frame_id, {}).get("typical") for f in frames]
+        frame["worst_acq"] = [measured.get(f.frame_id, {}).get("worst") for f in frames]
+        click.echo(f"  including measured coverage for {len(measured)} frames")
     output.parent.mkdir(parents=True, exist_ok=True)
     frame.to_file(output)
     click.echo(f"Wrote {len(frame)} {'grids' if grids else 'frames'} to {output}")
@@ -1226,12 +1239,26 @@ def _tile_seconds(database: Path) -> float:
     show_default=True,
     help="Call an acquisition poor when it covers less than this of its frame.",
 )
+@click.option(
+    "--grid",
+    default=DEFAULT_GRID,
+    show_default=True,
+    help="Samples per side across a frame; higher is finer and slower.",
+)
+@click.option(
+    "--store",
+    is_flag=True,
+    help="Write the result into the database so the map and the GIS export can "
+    "show it without measuring again.",
+)
 @_DB_OPTION
 def coverage(
     catalog: Path,
     output: Path | None,
     min_passes: int,
     poor_below: float,
+    grid: int,
+    store: bool,
     database: Path,
 ) -> None:
     """Measure the area every acquisition of a frame actually shares.
@@ -1240,7 +1267,9 @@ def coverage(
     matters is the intersection, not the frame. Where a few narrow passes drag it
     down, this shows what dropping them would buy.
     """
-    from sm_db.coverage import drop_curve, frame_coverage
+    from shapely.geometry import shape
+
+    from sm_db.coverage import frame_coverage
 
     frames = {f.frame_id: f for f in db_mod.read_frames(database)}
     observed = db_mod.read_acquisitions(database)
@@ -1248,31 +1277,43 @@ def coverage(
         raise click.ClickException(
             f"{database} has no acquisitions table; rebuild it with `sm-db update`"
         )
-    by_name = {g.name: g for g in granules_mod.load_catalog(catalog)}
+    footprints = {g.name: shape(g.geometry) for g in granules_mod.load_catalog(catalog)}
 
     targets = [(fid, acq) for fid, acq in observed.items() if len(acq) >= min_passes]
     click.echo(f"Measuring {len(targets)} frames with >= {min_passes} acquisitions")
 
-    report = {}
+    report: dict[str, dict] = {}
     with click.progressbar(targets, label="Measuring coverage") as bar:
-        for frame_id, acq in bar:
+        for frame_id, entries in bar:
             frame = frames.get(frame_id)
-            granules = [by_name[a["granule"]] for a in acq if a["granule"] in by_name]
-            if frame is None or not granules:
+            if frame is None:
                 continue
-            measured = frame_coverage(frame, granules)
+            names, shapes = [], []
+            for a in entries:
+                if a["granule"] in footprints:
+                    names.append(a["granule"])
+                    shapes.append(footprints[a["granule"]])
+            if len(shapes) < min_passes:
+                continue
+            measured = frame_coverage(
+                frame.polygon, shapes, names, frame_id=frame_id, grid=grid
+            )
             report[frame_id] = {
                 "n_acquisitions": measured.n_acquisitions,
                 "common": measured.common,
+                "typical": measured.typical,
                 "worst": measured.worst,
+                "cost_of_worst": measured.cost_of_worst,
                 "poor": measured.below(poor_below),
-                "drop_curve": drop_curve(measured),
             }
 
     _summarise_coverage(report, poor_below)
     if output:
         output.write_text(json.dumps(report, indent=2) + "\n")
         click.echo(f"Wrote {output}")
+    if store:
+        stored = db_mod.write_coverage(database, report)
+        click.echo(f"Stored coverage for {stored} frames in {database}")
 
 
 def _summarise_coverage(report: dict, poor_below: float) -> None:
@@ -1298,19 +1339,20 @@ def _summarise_coverage(report: dict, poor_below: float) -> None:
     if not hurt:
         return
 
-    # The question is whether a few passes are responsible, which is what the
-    # drop curve answers: if dropping one or two restores most of the area, the
-    # cost of keeping them is paid by every date in the stack.
-    rescued = {1: 0, 2: 0, 5: 0}
-    for r in hurt.values():
-        curve = dict(r["drop_curve"])
-        for k in rescued:
-            if curve.get(k, 0) >= poor_below:
-                rescued[k] += 1
-                break
+    # The question is whether the loss is the frame's or a few dates'. Where the
+    # typical date still fills the frame, a handful of narrow passes are holding
+    # the whole stack back and dropping them buys the area back. Where even the
+    # typical date falls short, the frame reaches past what one acquisition
+    # covers -- a frame widened beyond a single slice -- and no amount of
+    # dropping helps: it needs consecutive slices processed together.
+    few_dates = {f: r for f, r in hurt.items() if r["typical"] >= poor_below}
+    too_long = {f: r for f, r in hurt.items() if r["typical"] < poor_below}
     click.echo("")
-    click.echo("of those, restored to the threshold by dropping:")
-    for k in sorted(rescued):
-        click.echo(f"  {k} acquisition(s): {rescued[k]} frames")
-    stubborn = len(hurt) - sum(rescued.values())
-    click.echo(f"  still short after 5: {stubborn} frames")
+    click.echo(
+        f"  a few narrow dates hold the stack back : {len(few_dates):4d} frames "
+        "(dropping them recovers the area)"
+    )
+    click.echo(
+        f"  wider than one acquisition covers      : {len(too_long):4d} frames "
+        "(needs consecutive slices together)"
+    )
