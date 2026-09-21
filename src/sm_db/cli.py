@@ -16,6 +16,7 @@ from sm_db.coverage import DEFAULT_GRID
 from sm_db.frames import Frame, OrbitLookup, frames_for_granule, merge_frames
 from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP
 from sm_db.granules import SM_BEAM_MODES
+from sm_db.remote import ASSETS, fetch_asset
 from sm_db.tiling import DEFAULT_TILE_SECONDS, parse_frame_id
 
 DEFAULT_TOLERANCE = 0.0
@@ -422,6 +423,36 @@ def _write_geojson(frames: Iterable[Frame], path: Path) -> None:
     path.write_text(
         json.dumps({"type": "FeatureCollection", "features": features}, indent=2) + "\n"
     )
+
+
+@cli.command()
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=".",
+    show_default=True,
+    help="Directory to keep the downloaded files in.",
+)
+@click.option(
+    "--asset",
+    "assets",
+    type=click.Choice(ASSETS),
+    multiple=True,
+    help="Asset to fetch (repeatable). Default: the frame database only.",
+)
+@click.option("--force", is_flag=True, help="Download even if unchanged.")
+def fetch(output_dir: Path, assets: tuple[str, ...], force: bool) -> None:
+    """Download the published archive instead of building it.
+
+    The weekly workflow publishes the frame database, the granule catalog and
+    the frames GeoJSON as release assets. A repeat fetch is one conditional
+    request and downloads nothing unless the archive changed.
+    """
+    for name in assets or ("sm_frames.sqlite3",):
+        result = fetch_asset(output_dir, name, force=force)
+        state = "downloaded" if result.updated else "already current"
+        click.echo(f"{result.path}: {state} ({result.last_modified or 'unknown date'})")
 
 
 @cli.command()
