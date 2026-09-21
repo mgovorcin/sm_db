@@ -834,6 +834,16 @@ def update(
     # made. So every frame an adjustment names is forgotten and re-derived from
     # the acquisitions that produced it, and nothing else is touched.
     touched = _stale_frames(existing, per_frame, groups, dropped)
+    # A dropped frame only has to go: its granules were recorded against the
+    # frames beside it too, and those records are still right. Re-deriving would
+    # fetch an orbit for every pass it ever had, for nothing.
+    gone = touched & dropped
+    if gone and not rebuild:
+        for f in gone:
+            existing.pop(f, None)
+            known_acq.pop(f, None)
+        touched -= gone
+        click.echo(f"{len(gone)} dropped frame(s) removed")
     if touched and not rebuild:
         redo = {a["granule"] for f in touched for a in known_acq.get(f, [])}
         for f in touched:

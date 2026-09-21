@@ -451,3 +451,49 @@ class TestCoverageSummary:
         out = capsys.readouterr().out
         assert "hold the stack back :    1" in out
         assert "one acquisition covers      :    1" in out
+
+
+class TestUpdateDrops:
+    """Dropping a frame deletes it; it must not send its passes back for rework."""
+
+    def test_dropped_frame_is_removed_without_orbits(
+        self, runner, tmp_path, granule, monkeypatch
+    ):
+        from sm_db import granules as granules_mod
+        from sm_db.db import read_acquisitions, read_frames
+
+        kept, dropped = "t095_000003_s3", "t095_000004_s3"
+        seen = {"date": "2026-03-13", "platform": "S1C", "granule": granule.name}
+        database = tmp_path / "frames.sqlite3"
+        write_database(
+            [_frame(kept, 3), _frame(dropped, 4)],
+            database,
+            tile_seconds=5.0,
+            margin=5000.0,
+            snap=30.0,
+            acquisitions={kept: [seen], dropped: [seen]},
+        )
+        catalog = tmp_path / "granules.json.gz"
+        granules_mod.save_catalog([granule], catalog)
+        adjustments = tmp_path / "adjustments.json"
+        adjustments.write_text(json.dumps({"drops": [dropped]}))
+        monkeypatch.setattr(granules_mod, "query_asf", lambda **_: [])
+
+        result = runner.invoke(
+            cli,
+            [
+                "update",
+                "--catalog", str(catalog),
+                "--orbit-dir", str(tmp_path / "orbits"),
+                "-o", str(database),
+                "--geojson", str(tmp_path / "frames.geojson"),
+                "--viewer", str(tmp_path / "index.html"),
+                "--overrides", str(adjustments),
+                "--no-download",
+            ],
+        )  # fmt: skip
+
+        assert result.exit_code == 0, result.output
+        assert "re-derive" not in result.output
+        assert [f.frame_id for f in read_frames(database)] == [kept]
+        assert read_acquisitions(database) == {kept: [seen]}
