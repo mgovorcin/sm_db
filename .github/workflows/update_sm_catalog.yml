@@ -13,6 +13,12 @@ name: Update stripmap archive
 # 10 GB an Actions cache can hold. A frame's grid is frozen once defined, so only
 # new acquisitions are processed and only their orbits are fetched.
 #
+# Hand adjustments -- frames widened to hold a whole island, and the ocean-only
+# frames beside them dropped -- live in adjustments/sm_frame_adjustments.json,
+# which is committed. It is passed on every run so a dropped frame stays dropped
+# when new acquisitions arrive; frames already built to it are left alone, so
+# passing it costs nothing once applied.
+#
 # Everything comes from public sources: the ASF search API and the public
 # s1-orbits bucket. No credentials.
 
@@ -87,6 +93,7 @@ jobs:
             -o catalog/sm_frames.sqlite3 \
             --geojson catalog/sm_frames.geojson \
             --viewer docs/index.html \
+            --overrides adjustments/sm_frame_adjustments.json \
             ${{ inputs.rebuild && '--rebuild' || '' }}
 
       - name: Verify the database still describes the data
@@ -94,6 +101,7 @@ jobs:
           sm-db check \
             --catalog catalog/sm_granules.json.gz \
             --orbit-dir orbits \
+            --overrides adjustments/sm_frame_adjustments.json \
             -d catalog/sm_frames.sqlite3
 
       # Replaced in place, so the repository carries one copy rather than one per

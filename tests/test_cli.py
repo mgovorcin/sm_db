@@ -323,3 +323,97 @@ class TestCheckWithoutOrbits:
         )
         assert "1 granule(s) could not be checked" in result.output
         assert "0 problem(s)" in result.output
+
+
+class TestLoadDrops:
+    def test_reads_the_drops_list(self, tmp_path):
+        import json
+
+        from sm_db.cli import _load_drops
+
+        path = tmp_path / "adj.json"
+        path.write_text(json.dumps({"overrides": {}, "drops": ["a", "b"]}))
+        assert _load_drops(path) == {"a", "b"}
+
+    def test_absent_list_is_empty(self, tmp_path):
+        import json
+
+        from sm_db.cli import _load_drops
+
+        path = tmp_path / "adj.json"
+        path.write_text(json.dumps({"overrides": {}}))
+        assert _load_drops(path) == set()
+
+    def test_bare_list_carries_no_drops(self, tmp_path):
+        """A bare list is merge groups; it must not be misread as drops."""
+        import json
+
+        from sm_db.cli import _load_drops
+
+        path = tmp_path / "m.json"
+        path.write_text(json.dumps([["a", "b"]]))
+        assert _load_drops(path) == set()
+
+    def test_nothing_given(self):
+        from sm_db.cli import _load_drops
+
+        assert _load_drops(None, None) == set()
+
+
+class TestStaleFrames:
+    """The weekly job passes the same adjustments every run; only changes count."""
+
+    def _frame(self, frame_id, shift=0.0, overlap=0.0, inset=0.0):
+        import dataclasses
+
+        return dataclasses.replace(
+            _frame(frame_id), shift=shift, overlap=overlap, inset=inset
+        )
+
+    def test_an_already_applied_adjustment_is_not_redone(self):
+        from sm_db.cli import _stale_frames
+
+        existing = {"t095_000003_s3": self._frame("t095_000003_s3", shift=1.2)}
+        assert (
+            _stale_frames(existing, {"t095_000003_s3": {"shift": 1.2}}, [], set())
+            == set()
+        )
+
+    def test_a_changed_adjustment_is_redone(self):
+        from sm_db.cli import _stale_frames
+
+        existing = {"t095_000003_s3": self._frame("t095_000003_s3", shift=1.2)}
+        stale = _stale_frames(existing, {"t095_000003_s3": {"shift": 2.0}}, [], set())
+        assert stale == {"t095_000003_s3"}
+
+    def test_a_drop_still_present_is_redone(self):
+        from sm_db.cli import _stale_frames
+
+        existing = {"t095_000003_s3": self._frame("t095_000003_s3")}
+        assert _stale_frames(existing, {}, [], {"t095_000003_s3"}) == {"t095_000003_s3"}
+
+    def test_a_drop_already_gone_is_ignored(self):
+        from sm_db.cli import _stale_frames
+
+        assert _stale_frames({}, {}, [], {"t095_000003_s3"}) == set()
+
+    def test_an_unbuilt_merge_is_redone(self):
+        from sm_db.cli import _stale_frames
+
+        existing = {
+            "t095_000003_s3": self._frame("t095_000003_s3"),
+            "t095_000004_s3": self._frame("t095_000004_s3"),
+        }
+        stale = _stale_frames(
+            existing, {}, [["t095_000003_s3", "t095_000004_s3"]], set()
+        )
+        assert stale == {"t095_000003_s3", "t095_000004_s3"}
+
+    def test_a_built_merge_is_left_alone(self):
+        from sm_db.cli import _stale_frames
+
+        existing = {"t095_000003_s3": self._frame("t095_000003_s3")}
+        stale = _stale_frames(
+            existing, {}, [["t095_000003_s3", "t095_000004_s3"]], set()
+        )
+        assert stale == set()

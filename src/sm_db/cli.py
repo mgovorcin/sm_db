@@ -13,7 +13,7 @@ import click
 from sm_db import db as db_mod
 from sm_db import granules as granules_mod
 from sm_db.frames import Frame, OrbitLookup, frames_for_granule, merge_frames
-from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP, snap_bbox
+from sm_db.geometry import DEFAULT_MARGIN, DEFAULT_SNAP
 from sm_db.granules import SM_BEAM_MODES
 from sm_db.tiling import DEFAULT_TILE_SECONDS, parse_frame_id
 
@@ -192,10 +192,13 @@ def build(
         raise click.ClickException("No granules matched; nothing to build.")
 
     per_frame, groups = _load_adjustments(overrides, merge_file)
+    dropped = _load_drops(overrides, merge_file)
     if per_frame:
         click.echo(f"{len(per_frame)} frame(s) carry their own bounds")
     if groups:
         click.echo(f"{len(groups)} group(s) merged into single frames")
+    if dropped:
+        click.echo(f"{len(dropped)} frame(s) dropped")
 
     orbits = OrbitLookup(orbit_dir)
     defined: dict[str, Frame] = {}
@@ -220,6 +223,7 @@ def build(
                 inset=inset_m,
                 overrides=per_frame,
                 merges=groups,
+                drops=dropped,
             )
             if not found:
                 skipped.append(f"{granule.name}: too short to fill a frame")
@@ -283,6 +287,81 @@ def _build_parameters(database: Path) -> tuple[float, float]:
         float(json.loads(rows.get("margin", str(DEFAULT_MARGIN)))),
         float(json.loads(rows.get("snap", str(DEFAULT_SNAP)))),
     )
+
+
+def _stale_frames(
+    existing: dict[str, Frame],
+    per_frame: dict[str, dict],
+    groups: list[list[str]],
+    dropped: set[str],
+) -> set[str]:
+    """Return the frames whose stored definition no longer matches the adjustments.
+
+    The scheduled job passes the same adjustments file on every run, so "every
+    frame an adjustment names" would re-derive the same frames each week -- and
+    re-deriving needs every orbit those frames were ever built from, which a CI
+    cache does not hold. Only a frame whose recorded shift, overlap or inset
+    differs from what is now asked, or that should be gone but is still present,
+    needs the work. The database stores each frame's adjustment for exactly this.
+
+    Parameters
+    ----------
+    existing :
+        Frames already in the database.
+    per_frame :
+        Requested geometry adjustments, keyed by frame ID.
+    groups :
+        Requested merges.
+    dropped :
+        Frames that should not exist.
+
+    Returns
+    -------
+    set of str
+    """
+    stale = {f for f in dropped if f in existing}
+    for frame_id, wanted in per_frame.items():
+        frame = existing.get(frame_id)
+        if frame is None:
+            continue
+        have = {"shift": frame.shift, "overlap": frame.overlap, "inset": frame.inset}
+        if any(
+            abs(float(wanted.get(key, 0.0)) - value) > 1e-3
+            for key, value in have.items()
+        ):
+            stale.add(frame_id)
+    # A merge is applied once its later members have been absorbed; while any of
+    # them still stands as its own frame, the group has not been built yet.
+    for group in groups:
+        if any(member in existing for member in sorted(group)[1:]):
+            stale.update(m for m in group if m in existing)
+    return stale
+
+
+def _load_drops(*paths: Path | None) -> set[str]:
+    """Read the frames an adjustments file removes.
+
+    Kept apart from `_load_adjustments` so that function's return shape, which
+    callers and tests rely on, does not change.
+
+    Parameters
+    ----------
+    paths :
+        Adjustment files given on the command line; any may be `None`.
+
+    Returns
+    -------
+    set of str
+        Frame IDs never to emit.
+    """
+    dropped: set[str] = set()
+    for path in paths:
+        if path is None:
+            continue
+        data = json.loads(path.read_text())
+        if isinstance(data, dict):
+            dropped.update(data.get("drops", []))
+    return dropped
 
 
 def _load_adjustments(
@@ -444,8 +523,20 @@ def intersect(bbox: tuple[float, float, float, float], database: Path) -> None:
     show_default=True,
     help="Largest bbox disagreement to accept [m].",
 )
+@click.option(
+    "--overrides",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The adjustments the database was built with. Without them an adjusted "
+    "frame is re-derived at its default size and reported as a disagreement.",
+)
 @_DB_OPTION
-def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> None:
+def check(
+    orbit_dir: Path,
+    catalog: Path,
+    tolerance: float,
+    overrides: Path | None,
+    database: Path,
+) -> None:
     """Re-derive every frame from every granule and report disagreement.
 
     A frame's grid is pinned by the first acquisition that defined it. Repeat
@@ -457,6 +548,8 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
     not available are counted as unverified, not as failures.
     """
     stored = {f.frame_id: f for f in db_mod.read_frames(database)}
+    per_frame, groups = _load_adjustments(overrides, None)
+    dropped = _load_drops(overrides)
     margin, _ = _build_parameters(database)
     limit = tolerance or margin
     orbits = OrbitLookup(orbit_dir)
@@ -476,7 +569,9 @@ def check(orbit_dir: Path, catalog: Path, tolerance: float, database: Path) -> N
         orbit = orbits.find(granule)
         verified += 1
 
-        for frame in frames_for_granule(granule, orbit):
+        for frame in frames_for_granule(
+            granule, orbit, overrides=per_frame, merges=groups, drops=dropped
+        ):
             known = stored.get(frame.frame_id)
             if known is None:
                 problems.append(
@@ -696,10 +791,13 @@ def update(
     end = end or datetime.date.today().isoformat()
 
     per_frame, groups = _load_adjustments(overrides, merge_file)
+    dropped = _load_drops(overrides, merge_file)
     if per_frame:
         click.echo(f"{len(per_frame)} frame(s) carry their own bounds")
     if groups:
         click.echo(f"{len(groups)} group(s) merged into single frames")
+    if dropped:
+        click.echo(f"{len(dropped)} frame(s) dropped")
 
     click.echo(f"Catalog holds {len(known)} granules; querying ASF {start} to {end}")
     found = granules_mod.query_asf(
@@ -729,6 +827,22 @@ def update(
     )
     known_acq = db_mod.read_acquisitions(output) if output.exists() else {}
     seen = {a["granule"] for entries in known_acq.values() for a in entries}
+
+    # An adjustment changes a frame that is already defined, and an incremental
+    # run would otherwise keep the old definition forever -- a grid is frozen once
+    # made. So every frame an adjustment names is forgotten and re-derived from
+    # the acquisitions that produced it, and nothing else is touched.
+    touched = _stale_frames(existing, per_frame, groups, dropped)
+    if touched and not rebuild:
+        redo = {a["granule"] for f in touched for a in known_acq.get(f, [])}
+        for f in touched:
+            existing.pop(f, None)
+            known_acq.pop(f, None)
+        seen -= redo
+        click.echo(
+            f"{len(touched)} adjusted frame(s) to re-derive "
+            f"from {len(redo)} acquisition(s)"
+        )
 
     pending = everything if rebuild else [g for g in everything if g.name not in seen]
     if existing and not rebuild:
@@ -769,6 +883,7 @@ def update(
                 inset=inset_m,
                 overrides=per_frame,
                 merges=groups,
+                drops=dropped,
             )
             found_frames = [f for f in found_frames if f.fill_pct >= min_fill]
             covered.append((granule, [f.frame_id for f in found_frames]))
@@ -778,9 +893,14 @@ def update(
         click.echo(f"  skipped {skipped} granule(s) with no orbit available", err=True)
 
     # Fold this run's acquisitions into what the database already recorded.
+    # Re-deriving an adjusted frame reprocesses its granules, which also yield
+    # that frame's neighbours -- already recorded -- so an acquisition is only
+    # added to a frame that does not have it yet.
     observed = dict(known_acq)
     for frame_id, entries in frame_acquisitions(covered).items():
-        merged = observed.get(frame_id, []) + entries
+        have = {a["granule"] for a in observed.get(frame_id, [])}
+        fresh = [a for a in entries if a["granule"] not in have]
+        merged = observed.get(frame_id, []) + fresh
         observed[frame_id] = sorted(merged, key=lambda a: (a["date"], a["granule"]))
 
     n = db_mod.write_database(
@@ -952,29 +1072,39 @@ def export(output: Path, grids: bool, database: Path) -> None:
 @cli.command("import-shapes")
 @click.argument("shapes", type=click.Path(exists=True, path_type=Path))
 @click.option(
+    "--catalog",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Catalog holding the granules, to read each edit against a real pass.",
+)
+@click.option(
+    "--orbit-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Orbit files, to measure each edit along the track.",
+)
+@click.option(
     "-o",
     "--output",
     type=click.Path(path_type=Path),
     default="sm_frame_adjustments.json",
     show_default=True,
-    help="Adjustments file to write, for --overrides on a rebuild.",
+    help="Adjustments file to write, for --overrides on the next build.",
 )
 @_DB_OPTION
-def import_shapes(shapes: Path, output: Path, database: Path) -> None:
-    """Turn an edited GIS file back into per-frame bounds.
+def import_shapes(
+    shapes: Path, catalog: Path, orbit_dir: Path, output: Path, database: Path
+) -> None:
+    """Read frames edited in a GIS back into adjustments a build reproduces.
 
-    An edited polygon is taken at face value: its bounding box in the frame's own
-    projection becomes that frame's pinned grid, replacing what the orbit would
-    have produced. Frames whose geometry is unchanged are left out, so the file
-    only carries what was actually moved.
+    An edited frame keeps only what an edit can mean for a stripmap swath: where
+    along the track it starts and stops. Its east and west sides go back onto the
+    swath edges, so a side dragged off by hand is corrected rather than kept.
+    A frame missing from the file is dropped.
     """
     import geopandas as gpd
-    from pyproj import Transformer
-    from shapely.ops import transform
 
-    def to_map(polygon, epsg):
-        tf = Transformer.from_crs(4326, epsg, always_xy=True)
-        return transform(lambda x, y: tf.transform(x, y), polygon)
+    from sm_db.adjust import along_track_window, window_to_offsets
 
     edited = gpd.read_file(shapes)
     if "frame_id" not in edited.columns:
@@ -985,33 +1115,90 @@ def import_shapes(shapes: Path, output: Path, database: Path) -> None:
         edited = edited.to_crs(4326)
 
     known = {f.frame_id: f for f in db_mod.read_frames(database)}
-    margin, snap = _build_parameters(database)
-    moved: dict[str, dict] = {}
-    unknown = 0
+    observed = db_mod.read_acquisitions(database)
+    granules = {g.name: g for g in granules_mod.load_catalog(catalog)}
+    orbits = OrbitLookup(orbit_dir)
+    tile_seconds = _tile_seconds(database)
+
+    present = set(edited["frame_id"].dropna())
+    dropped = sorted(set(known) - present)
+    unknown = sorted(present - set(known))
+
+    overrides: dict[str, dict] = {}
+    windows: dict[str, list[float]] = {}
+    unmeasured: list[str] = []
+    straightened = 0
 
     for _, row in edited.iterrows():
         frame = known.get(row["frame_id"])
-        if frame is None:
-            unknown += 1
+        if frame is None or row.geometry is None:
             continue
-        # Compare the geometry, not a box derived from it: the stored bbox is the
-        # footprint's envelope plus the margin, snapped, so deriving one from an
-        # untouched polygon never matches and every frame would look edited.
-        # The tolerance covers the rounding a shapefile applies on the way out.
+        # Shapefiles round coordinates on the way out, hence the tolerance.
         if row.geometry.equals_exact(frame.polygon, 1e-6):
             continue
-        projected = to_map(row.geometry, frame.epsg)
-        # Pad and snap exactly as a build would, so an edited frame is pinned the
-        # same way every other frame is.
-        left, bottom, right, top = projected.bounds
-        bbox = list(snap_bbox(left, bottom, right, top, margin=margin, snap=snap))
-        moved[row["frame_id"]] = {"bbox": bbox, "epsg": frame.epsg}
+        granule = next(
+            (
+                granules[a["granule"]]
+                for a in observed.get(frame.frame_id, [])
+                if a["granule"] in granules and orbits.covers(granules[a["granule"]])
+            ),
+            None,
+        )
+        if granule is None:
+            unmeasured.append(frame.frame_id)
+            continue
+        window = along_track_window(
+            row.geometry,
+            granule,
+            orbits.find(granule),
+            frame.epsg,
+            frame.index,
+            tile_seconds,
+        )
+        shift, overlap = window_to_offsets(frame.index, window, tile_seconds)
+        overrides[frame.frame_id] = {"shift": shift, "overlap": overlap}
+        windows[frame.frame_id] = [round(window.start, 3), round(window.stop, 3)]
+        if max(abs(window.west_deviation), abs(window.east_deviation)) > 50:
+            straightened += 1
 
     if unknown:
-        click.echo(f"  ignored {unknown} shape(s) with an unknown frame_id", err=True)
+        click.echo(
+            f"  ignored {len(unknown)} shape(s) with an unknown frame_id", err=True
+        )
+    for frame_id in unmeasured:
+        click.echo(f"  could not measure {frame_id}: no orbit on hand", err=True)
 
-    output.write_text(json.dumps({"overrides": moved, "merges": []}, indent=2) + "\n")
-    click.echo(f"{len(moved)} frame(s) moved; wrote {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(
+            {
+                "overrides": overrides,
+                "merges": [],
+                "drops": dropped,
+                # Readable record of what each edit means, in seconds since the
+                # ascending node. Not read back; `overrides` is the source of truth.
+                "windows": windows,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    click.echo(
+        f"{len(overrides)} frame(s) reframed along track, "
+        f"{straightened} with sides pulled back onto the swath; "
+        f"{len(dropped)} dropped. Wrote {output}"
+    )
+
+
+def _tile_seconds(database: Path) -> float:
+    """Return the tile length a database was built with."""
+    import sqlite3
+
+    with sqlite3.connect(database) as con:
+        row = con.execute(
+            "SELECT value FROM metadata WHERE key = 'tile_seconds'"
+        ).fetchone()
+    return float(json.loads(row[0])) if row else DEFAULT_TILE_SECONDS
 
 
 @cli.command()

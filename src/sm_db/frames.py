@@ -251,6 +251,7 @@ def frames_for_granule(
     inset: float = DEFAULT_INSET,
     overrides: dict[str, dict] | None = None,
     merges: list[list[str]] | None = None,
+    drops: set[str] | frozenset[str] | None = None,
 ) -> list[Frame]:
     """Return the frames a granule fully covers, with their pinned grids.
 
@@ -289,6 +290,10 @@ def frames_for_granule(
         A group is only emitted when the scene covers every member, since a
         merged frame must be filled edge to edge like any other. Members must
         share a track and beam and be consecutive; anything else is ignored.
+    drops :
+        Frame IDs never to emit. A frame deliberately removed -- open ocean beside
+        an island that a neighbour was widened to hold -- has to stay removed
+        when new acquisitions arrive, or the next run would quietly bring it back.
     overrides :
         Per-frame geometry, keyed by frame ID, each a mapping with any of
         ``shift``, ``overlap`` and ``inset``. A frame listed here ignores the
@@ -335,6 +340,8 @@ def frames_for_granule(
             # The ID is known before the geometry is built, which is what lets a
             # single frame carry its own bounds without disturbing its neighbours.
             frame_id = tiling.format_frame_id(track, tile.index, granule.beam_mode)
+            if drops and frame_id in drops:
+                continue
             own = (overrides or {}).get(frame_id, {})
             built = _build_frame(
                 granule,
