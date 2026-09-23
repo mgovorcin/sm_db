@@ -283,7 +283,6 @@ def write_viewer(
     acquisitions: dict[str, list[dict]] | None = None,
     title: str = "Sentinel-1 Stripmap frames",
     subtitle: str = "",
-    tile_seconds: float = 5.0,
     aoi: dict | None = None,
 ) -> Path:
     """Write the frame map to a self-contained HTML file.
@@ -300,10 +299,6 @@ def write_viewer(
         Page heading.
     subtitle :
         Line under the heading.
-    tile_seconds :
-        Frame length the database was built with. The page needs it to convert
-        the bounds sliders, which are in kilometres, into the seconds the CLI
-        flags take.
     aoi :
         GeoJSON FeatureCollection of areas of interest to ship with the page.
         `None` writes an empty one, which is what a published copy should carry;
@@ -327,7 +322,6 @@ def write_viewer(
         _TEMPLATE.replace("__TITLE__", title)
         .replace("__SUBTITLE__", subtitle)
         .replace("__BUILT__", built)
-        .replace("__TILE_SECONDS__", str(tile_seconds))
         .replace("__GRANULE_MAX__", str(GRANULE_DETAIL_MAX))
         .replace(
             "__AOI__", json.dumps(aoi or {"type": "FeatureCollection", "features": []})
@@ -498,18 +492,6 @@ table.kv td { text-align: right; color: var(--text-1); padding: 2px 0; }
   padding: 7px 9px; font-size: 11px; margin: 9px 0 0; line-height: 1.45; }
 
 /* ---- frame list ---- */
-.grow { display: flex; gap: 8px; align-items: center; }
-.grow input[type=range] { flex: 1; }
-.grow input[type=number] {
-  width: 68px; flex: none; background: var(--surface-2); color: var(--text-1);
-  border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px;
-  font: inherit; font-size: 12px; font-variant-numeric: tabular-nums;
-}
-.cliline {
-  margin-top: 9px; padding: 7px 9px; background: var(--surface-2);
-  border-radius: 6px; color: var(--text-2); font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;
-}
 .flist { max-height: 210px; overflow-y: auto; border-top: 1px solid var(--border); }
 .flist button {
   display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
@@ -736,40 +718,6 @@ table.acq tr.dup td { color: var(--dup); }
       </div>
 
       <div class="section">
-        <div class="section-head" data-target="sec-geom"><span>Frame bounds</span><span class="chev">&#9660;</span></div>
-        <div class="section-body" id="sec-geom">
-          <p class="note">Adjusts <b>one frame at a time</b> -- the selected one --
-            because a boundary that cuts through an island is a problem for that
-            frame, not for the archive. Select a frame, nudge it, then export the
-            set and rebuild with <code>--overrides</code>.</p>
-          <div class="cliline" id="g-target">No frame selected.</div>
-          <label>Move along track (km)</label>
-          <div class="grow"><input type="range" id="g-shift" min="-300" max="300" step="1" value="0">
-            <input type="number" id="g-shift-v" value="0" step="1"></div>
-          <label>Extend each end (km)</label>
-          <div class="grow"><input type="range" id="g-grow" min="-50" max="300" step="1" value="0">
-            <input type="number" id="g-grow-v" value="0" step="1"></div>
-          <label>Trim each side (km)</label>
-          <div class="grow"><input type="range" id="g-inset" min="-100" max="100" step="1" value="0">
-            <input type="number" id="g-inset-v" value="0" step="1"></div>
-          <label style="margin-top:12px;">Merge with a neighbour</label>
-          <div class="row">
-            <button class="btn" id="g-merge-prev">+ previous</button>
-            <button class="btn" id="g-merge-next">+ next</button>
-            <button class="btn" id="g-unmerge">unmerge</button>
-          </div>
-          <p class="note" style="margin-top:6px;">Two consecutive frames become one,
-            keeping the lower id, so a target sitting on the boundary is whole in a
-            single frame.</p>
-          <div class="row" style="margin-top:9px;">
-            <button class="btn" id="g-reset">Reset this frame</button>
-            <button class="btn" id="g-export">Export adjustments</button>
-          </div>
-          <div class="flist" id="g-list" style="max-height:150px;margin-top:9px;"></div>
-        </div>
-      </div>
-
-      <div class="section">
         <div class="section-head" data-target="sec-list"><span>Frames</span><span class="chev">&#9660;</span></div>
         <div class="section-body" id="sec-list">
           <p class="note">Every frame matching the filters, most-imaged first. Click one
@@ -815,7 +763,6 @@ table.acq tr.dup td { color: var(--dup); }
 
 <script>
 const FRAMES = __FRAMES__;
-const TILE_SECONDS = __TILE_SECONDS__;
 const GRANULE_DETAIL_MAX = __GRANULE_MAX__;
 const GRIDS  = __GRIDS__;
 
@@ -939,8 +886,6 @@ const state = {
   minAcq: 1,
   minFill: 0,
   track: "",
-  overrides: {},          // frame_id -> {shiftKm, growKm, insetKm}
-  merges: [],             // arrays of consecutive frame ids drawn as one
   showSites: false,
   autoPanel: true,
   d0: null,
@@ -1035,17 +980,7 @@ function renderLegend() {
     .join("");
 }
 
-/* ------------------------------------------------- adjustable geometry --- */
-// The three sliders move the frame on the ground without touching its ID, the
-// same way `--shift-seconds`, `--overlap-seconds` and `--inset-m` do when the
-// database is rebuilt. Doing it here first makes the choice visible before a
-// rebuild commits to it.
-//
-// A frame ring is [nearStart, farStart, farStop, nearStop], so the along-track
-// axis runs from the midpoint of the first edge to the midpoint of the last, and
-// the cross-track axis lies along either end edge.
-const KM_PER_DEG = 111.32;
-
+/* ------------------------------------------------- areas of interest --- */
 // Areas of interest to locate on the map while judging whether the archive
 // covers anything useful. The page ships with whatever `--aoi` supplied, which is
 // an empty collection by default, and the file picker loads more at runtime. A
@@ -1092,166 +1027,6 @@ function aoiBounds(feature) {
   return [w, s2, e, n];
 }
 
-function adjustRing(ring, frameId) {
-  const o = state.overrides[frameId];
-  if (!o) return ring;
-  const { shiftKm, growKm, insetKm } = o;
-  if (!shiftKm && !growKm && !insetKm) return ring;
-
-  const [a, b, c, d] = ring;                       // near0, far0, far1, near1
-  const lat = (a[1] + c[1]) / 2;
-  const kx = KM_PER_DEG * Math.max(0.05, Math.cos((lat * Math.PI) / 180));
-  const toDeg = (p, km) => [p[0] * km / kx, p[1] * km / KM_PER_DEG];
-
-  const mid0 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-  const mid1 = [(c[0] + d[0]) / 2, (c[1] + d[1]) / 2];
-  const along = unit([mid1[0] - mid0[0], mid1[1] - mid0[1]], kx);
-  const across = unit([b[0] - a[0], b[1] - a[1]], kx);
-
-  const shift = toDeg(along, shiftKm);
-  const grow = toDeg(along, growKm);
-  const trim = toDeg(across, insetKm);
-
-  const move = (p, ...deltas) => {
-    let [x, y] = p;
-    for (const dd of deltas) { x += dd[0]; y += dd[1]; }
-    return [x, y];
-  };
-  const neg = v => [-v[0], -v[1]];
-
-  return [
-    move(a, shift, neg(grow), trim),
-    move(b, shift, neg(grow), neg(trim)),
-    move(c, shift, grow, neg(trim)),
-    move(d, shift, grow, trim)
-  ];
-}
-
-// Unit vector in local kilometres, returned in the same (lon, lat) degree basis.
-function unit(v, kx) {
-  const x = v[0] * kx, y = v[1] * KM_PER_DEG;
-  const n = Math.hypot(x, y) || 1;
-  return [v[0] / n * (kx / kx), v[1] / n];
-}
-
-// Frames are contiguous along track, so a merged group is drawn as one
-// quadrilateral running from the first member's leading edge to the last
-// member's trailing edge -- the same shape `--merge` produces on a rebuild.
-function neighbourId(p, step) {
-  return `t${String(p.track).padStart(3, "0")}_` +
-         `${String(p.frame_index + step).padStart(6, "0")}_${p.beam.toLowerCase()}`;
-}
-
-function groupOf(frameId) {
-  return state.merges.find(g => g.includes(frameId)) || null;
-}
-
-function mergedFeatures(features) {
-  if (!state.merges.length) return features;
-  const byId = new Map(features.map(f => [f.properties.frame_id, f]));
-  const used = new Set();
-  const out = [];
-
-  for (const group of state.merges) {
-    const members = group.map(id => byId.get(id));
-    if (members.some(m => !m)) continue;              // not all are shown
-    const ordered = members.slice().sort(
-      (a, b) => a.properties.frame_index - b.properties.frame_index);
-    const first = adjustRing(ordered[0].geometry.coordinates[0].slice(0, 4),
-                             ordered[0].properties.frame_id);
-    const last = adjustRing(
-      ordered[ordered.length - 1].geometry.coordinates[0].slice(0, 4),
-      ordered[ordered.length - 1].properties.frame_id);
-    const ring = [first[0], first[1], last[2], last[3]];
-    const acq = ordered.reduce((a, m) => a + m.properties.n_acquisitions, 0);
-    out.push({
-      type: "Feature",
-      geometry: { type: "Polygon", coordinates: [[...ring, ring[0]]] },
-      properties: { ...ordered[0].properties, n_acquisitions: acq, _merged: group.length }
-    });
-    group.forEach(id => used.add(id));
-  }
-  for (const f of features) {
-    if (!used.has(f.properties.frame_id)) out.push(f);
-  }
-  return out;
-}
-
-function adjustedFeature(f) {
-  const ring = adjustRing(f.geometry.coordinates[0].slice(0, 4), f.properties.frame_id);
-  return {
-    ...f,
-    geometry: { type: "Polygon", coordinates: [[...ring, ring[0]]] }
-  };
-}
-
-function overrideFlags(o) {
-  const s = km => (km / groundSpeedKmS()).toFixed(2);
-  const bits = [];
-  if (o.shiftKm) bits.push(`shift ${s(o.shiftKm)}s`);
-  if (o.growKm) bits.push(`overlap ${s(o.growKm)}s`);
-  if (o.insetKm) bits.push(`inset ${Math.round(o.insetKm * 1000)}m`);
-  return bits.join(", ");
-}
-
-function updateCliLine() {
-  const target = document.getElementById("g-target");
-  const id = state.selected;
-  target.textContent = id
-    ? `Adjusting ${id}${overrideFlags(state.overrides[id] || {}) ? " -- " + overrideFlags(state.overrides[id]) : ""}`
-    : "No frame selected.";
-
-  const list = document.getElementById("g-list");
-  const ids = Object.keys(state.overrides);
-  const mergeRows = state.merges.map(g =>
-    `<button data-ov="${g[0]}"><span>${g[0]}</span>
-       <span class="n">merged with ${g.length - 1} more</span>
-       <i class="sw" style="background:${cssVar("--accent")}"></i></button>`).join("");
-  list.innerHTML = (mergeRows || "") + (ids.length
-    ? ids.sort().map(k =>
-        `<button data-ov="${k}"><span>${k}</span>
-           <span class="n">${overrideFlags(state.overrides[k])}</span>
-           <i class="sw" style="background:${cssVar("--grid-line")}"></i></button>`).join("")
-    : (mergeRows ? "" : '<div class="note" style="margin:6px 0 0">No frames adjusted yet.</div>'));
-}
-
-// The overrides file `sm-db build --overrides` reads: seconds along track,
-// metres across, keyed by frame id.
-function exportOverrides() {
-  const speed = groundSpeedKmS();
-  const out = {};
-  for (const [id, o] of Object.entries(state.overrides)) {
-    const entry = {};
-    if (o.shiftKm) entry.shift = +(o.shiftKm / speed).toFixed(3);
-    if (o.growKm) entry.overlap = +(o.growKm / speed).toFixed(3);
-    if (o.insetKm) entry.inset = Math.round(o.insetKm * 1000);
-    if (Object.keys(entry).length) out[id] = entry;
-  }
-  const payload = { overrides: out, merges: state.merges };
-  const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"],
-                        { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "sm_frame_adjustments.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
-let _speed = null;
-function groundSpeedKmS() {
-  if (_speed) return _speed;
-  const f = FRAMES.features[0];
-  if (!f) return 6.5;
-  const r = f.geometry.coordinates[0];
-  const mid0 = [(r[0][0] + r[1][0]) / 2, (r[0][1] + r[1][1]) / 2];
-  const mid1 = [(r[2][0] + r[3][0]) / 2, (r[2][1] + r[3][1]) / 2];
-  const lat = (mid0[1] + mid1[1]) / 2;
-  const dx = (mid1[0] - mid0[0]) * KM_PER_DEG * Math.cos((lat * Math.PI) / 180);
-  const dy = (mid1[1] - mid0[1]) * KM_PER_DEG;
-  _speed = Math.hypot(dx, dy) / TILE_SECONDS;
-  return _speed;
-}
-
 /* ------------------------------------------------------------------ map --- */
 function paint() {
   const shown = visible();
@@ -1259,10 +1034,8 @@ function paint() {
 
   const fc = {
     type: "FeatureCollection",
-    features: mergedFeatures(shown).map(f => {
-      const adj = f.properties._merged ? f : adjustedFeature(f);
-      return { ...adj, properties: { ...f.properties, _color: colorOf(f.properties) } };
-    })
+    features: shown.map(f =>
+      ({ ...f, properties: { ...f.properties, _color: colorOf(f.properties) } }))
   };
   if (map && mapReady) {
     map.getSource("frames").setData(fc);
@@ -1529,7 +1302,6 @@ function select(frameId, openWindow) {
       bbox ${p.bbox.join(" ")}
     </div>`;
 
-  syncBoundsSliders();
   renderTimeline(p);
   const openBtn = document.getElementById("open-win");
   if (openBtn) openBtn.onclick = () => openFramePanel(f);
@@ -2127,92 +1899,6 @@ document.getElementById("min-fill").oninput = ev => {
   state.minFill = +ev.target.value;
   document.getElementById("min-fill-v").textContent = state.minFill;
   paint();
-};
-function currentOverride() {
-  const id = state.selected;
-  if (!id) return null;
-  if (!state.overrides[id]) state.overrides[id] = { shiftKm: 0, growKm: 0, insetKm: 0 };
-  return state.overrides[id];
-}
-
-function syncBoundsSliders() {
-  const o = state.overrides[state.selected] || { shiftKm: 0, growKm: 0, insetKm: 0 };
-  for (const [id, key] of BOUND_CONTROLS) {
-    const slider = document.getElementById(id);
-    slider.value = Math.max(+slider.min, Math.min(+slider.max, o[key]));
-    document.getElementById(id + "-v").value = o[key];
-  }
-  updateCliLine();
-}
-
-const BOUND_CONTROLS = [
-  ["g-shift", "shiftKm"], ["g-grow", "growKm"], ["g-inset", "insetKm"]
-];
-
-function applyBound(key, value) {
-  const o = currentOverride();
-  if (!o) return false;
-  o[key] = Number.isFinite(value) ? value : 0;
-  if (!o.shiftKm && !o.growKm && !o.insetKm) delete state.overrides[state.selected];
-  updateCliLine();
-  paint();
-  return true;
-}
-
-for (const [id, key] of BOUND_CONTROLS) {
-  const slider = document.getElementById(id);
-  const box = document.getElementById(id + "-v");
-  slider.oninput = ev => {
-    if (!applyBound(key, +ev.target.value)) { ev.target.value = 0; return; }
-    box.value = ev.target.value;
-  };
-  // The number box accepts values beyond the slider's ends; the slider then just
-  // pins to its limit while the real value is whatever was typed.
-  box.oninput = ev => {
-    const v = parseFloat(ev.target.value);
-    if (!applyBound(key, v)) { ev.target.value = 0; return; }
-    slider.value = Math.max(+slider.min, Math.min(+slider.max, v || 0));
-  };
-}
-document.getElementById("g-reset").onclick = () => {
-  if (state.selected) delete state.overrides[state.selected];
-  syncBoundsSliders();
-  paint();
-};
-function mergeWith(step) {
-  const id = state.selected;
-  if (!id) return;
-  const f = FRAMES.features.find(x => x.properties.frame_id === id);
-  if (!f) return;
-  const neighbour = neighbourId(f.properties, step);
-  if (!FRAMES.features.some(x => x.properties.frame_id === neighbour)) return;
-
-  // Growing an existing group keeps it one frame rather than making two.
-  const existing = groupOf(id) || groupOf(neighbour);
-  if (existing) {
-    for (const candidate of [id, neighbour]) {
-      if (!existing.includes(candidate)) existing.push(candidate);
-    }
-    existing.sort();
-  } else {
-    state.merges.push([id, neighbour].sort());
-  }
-  updateCliLine();
-  paint();
-}
-
-document.getElementById("g-merge-prev").onclick = () => mergeWith(-1);
-document.getElementById("g-merge-next").onclick = () => mergeWith(1);
-document.getElementById("g-unmerge").onclick = () => {
-  const group = state.selected && groupOf(state.selected);
-  if (group) state.merges.splice(state.merges.indexOf(group), 1);
-  updateCliLine();
-  paint();
-};
-document.getElementById("g-export").onclick = exportOverrides;
-document.getElementById("g-list").onclick = ev => {
-  const b = ev.target.closest("button");
-  if (b) select(b.dataset.ov, false);
 };
 document.getElementById("q-track").oninput = ev => { state.track = ev.target.value.trim(); paint(); };
 document.getElementById("color-by").onchange = ev => { state.colorBy = ev.target.value; paint(); };

@@ -971,7 +971,6 @@ def update(
         viewer,
         acquisitions=observed,
         subtitle=f"{n} frames from {len(everything)} acquisitions",
-        tile_seconds=tile_seconds,
     )
     click.echo(f"Wrote {viewer}")
 
@@ -1036,16 +1035,7 @@ def viewer_cmd(
             )
         acquisitions = frame_acquisitions(covered)
 
-    import json as _json
-    import sqlite3 as _sqlite3
-
-    with _sqlite3.connect(database) as con:
-        row = con.execute(
-            "SELECT value FROM metadata WHERE key = 'tile_seconds'"
-        ).fetchone()
-    tile_seconds = _json.loads(row[0]) if row else DEFAULT_TILE_SECONDS
-
-    write_viewer(frames, output, acquisitions=acquisitions, tile_seconds=tile_seconds)
+    write_viewer(frames, output, acquisitions=acquisitions)
     click.echo(f"Wrote {output}")
 
 
