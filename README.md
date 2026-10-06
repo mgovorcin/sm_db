@@ -103,17 +103,32 @@ sm-db update
 sm-db viewer -d sm_frames.sqlite3 --catalog catalog.json --orbit-dir orbits
 ```
 
-## The tracked archive
+## The published archive
 
-`catalog/` holds the committed archive, refreshed daily by
-[`update_sm_catalog.yml`](.github/workflows/update_sm_catalog.yml):
+The archive is not committed: `catalog/` is gitignored. The weekly job
+[`update_sm_catalog.yml`](.github/workflows/update_sm_catalog.yml) (Mondays
+02:00 UTC) extends the catalog, rebuilds the database and replaces the assets of
+the `archive` release in place, so git history carries no copies:
 
-| file | |
+| asset | |
 |---|---|
-| `sm_granules.json` | every stripmap acquisition found, with footprint and timing |
 | `sm_frames.sqlite3` | the frame database COMPASS reads |
+| `sm_granules.json.gz` | every stripmap acquisition found, with footprint and timing |
 | `sm_frames.geojson` | frame footprints for a GIS |
-| `docs/frame-viewer.html` | the map, coloured by acquisitions per frame |
+
+The map (`docs/index.html`, coloured by acquisitions per frame) is deployed to
+GitHub Pages: <https://mgovorcin.github.io/sm_db/>.
+
+Fetch instead of building (building needs every orbit file of the archive,
+24 GB):
+
+```bash
+sm-db fetch                                   # the frame database only
+sm-db fetch --asset sm_granules.json.gz --asset sm_frames.geojson -o catalog
+```
+
+A repeat `fetch` is one conditional request and downloads nothing unless the
+archive changed.
 
 Because a stripmap campaign is tasked by hand, coverage is patchy and the map is
 the quickest way to see what can actually carry a time series. Rebuilds are safe:

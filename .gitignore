@@ -3,7 +3,7 @@ orbits/
 
 # Generated artifacts are never committed: ~18 MB a run becomes gigabytes of
 # git history within a year. The scheduled job publishes the database as a
-# release asset and the map straight to Pages. See update_sm_archive.yml.
+# release asset and the map straight to Pages. See .github/workflows/update_sm_catalog.yml.
 catalog/
 docs/index.html
 exports/
