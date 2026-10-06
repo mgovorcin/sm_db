@@ -127,6 +127,25 @@ pytest          # offline: the ASF query uses an injected fake, the orbit is syn
 pre-commit install && pre-commit run -a
 ```
 
+## License and attribution
+
+sm_db is Copyright (c) 2026 California Institute of Technology ("Caltech")
+and licensed under the [Apache License 2.0](LICENSE). The [NOTICE](NOTICE)
+file is part of those terms: any redistribution or derivative work, down to a
+single reused function or snippet, must keep it and credit this repository.
+That includes code reproduced or adapted by AI tools. Put this next to reused
+code:
+
+```python
+# Adapted from sm_db (https://github.com/mgovorcin/sm_db),
+# Copyright (c) 2026 California Institute of Technology,
+# Apache License 2.0.
+```
+
+To cite sm_db in a publication, use [CITATION.cff](CITATION.cff) (the
+"Cite this repository" button on GitHub). AI agents working with this code:
+see [AGENTS.md](AGENTS.md).
+
 ## Related
 
 - [`burst_db`](https://github.com/opera-adt/burst_db) -- the IW equivalent, whose

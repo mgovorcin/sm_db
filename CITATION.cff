@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, or reuse any part of its code (including code
+  reproduced or adapted by AI tools), cite it as below and keep the
+  attribution in NOTICE.
+title: "sm_db: Sentinel-1 Stripmap frame database"
+type: software
+authors:
+  - family-names: Govorcin
+    given-names: Marin
+    affiliation: "Jet Propulsion Laboratory, California Institute of Technology"
+repository-code: "https://github.com/mgovorcin/sm_db"
+url: "https://mgovorcin.github.io/sm_db/"
+license: Apache-2.0
+keywords:
+  - Sentinel-1
+  - Stripmap
+  - SAR
+  - InSAR
+  - OPERA

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 California Institute of Technology ("Caltech")
+# SPDX-License-Identifier: Apache-2.0
+# Part of sm_db, https://github.com/mgovorcin/sm_db. If you copy or adapt
+# any of this code, keep this notice and cite the repository (see NOTICE).
 """Turn stripmap acquisitions into frames with pinned grids.
 
 This is where `sm_db.tiling` (which tile), `sm_db.anx` (from which zero point)

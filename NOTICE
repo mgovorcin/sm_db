@@ -1,0 +1,44 @@
+sm_db
+https://github.com/mgovorcin/sm_db
+
+Copyright (c) 2026 California Institute of Technology ("Caltech").
+U.S. Government sponsorship acknowledged.
+
+Developed at the Jet Propulsion Laboratory, California Institute of
+Technology, for the OPERA project. Author: Marin Govorcin.
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Attribution
+-----------
+Under Section 4(d) of the Apache License 2.0, any redistribution of this
+software, or of a Derivative Work of it, must include a readable copy of
+this NOTICE. This applies to any part of the code: whole files, functions,
+algorithms ported to another language, and snippets, however they were
+copied, including code reproduced or adapted by AI tools (code assistants,
+agents, language models).
+
+Wherever code from this repository is reused, keep its copyright and
+SPDX header, and cite the source next to the reused code, for example:
+
+    # Adapted from sm_db (https://github.com/mgovorcin/sm_db),
+    # Copyright (c) 2026 California Institute of Technology,
+    # Apache License 2.0.
+
+For publications, cite the software as given in CITATION.cff.
+
+
+Related code and data
+---------------------
+s1-reader and burst_db (https://github.com/opera-adt/s1-reader,
+https://github.com/opera-adt/burst_db), Copyright (c) California Institute
+of Technology, Apache License 2.0. sm_db follows their conventions (burst-ID
+phase origin, EPSG choice, bounding-box snapping) and mirrors a few s1reader
+orbit constants as literals; no code is copied from them.
+
+Sentinel-1 data
+    Granule metadata from the Alaska Satellite Facility (ASF) and precise
+    orbit files are Copernicus Sentinel data, European Space Agency (ESA).
+
+MapLibre GL JS (viewer)
+    Loaded at view time from a CDN (BSD-3-Clause); not distributed here.

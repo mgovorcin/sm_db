@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 California Institute of Technology ("Caltech")
+# SPDX-License-Identifier: Apache-2.0
+# Part of sm_db, https://github.com/mgovorcin/sm_db. If you copy or adapt
+# any of this code, keep this notice and cite the repository (see NOTICE).
 """Fetch the precise orbits a frame definition needs.
 
 Frames are measured from the ascending node, which `sm_db.anx` reads off the

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 California Institute of Technology ("Caltech")
+# SPDX-License-Identifier: Apache-2.0
+# Part of sm_db, https://github.com/mgovorcin/sm_db. If you copy or adapt
+# any of this code, keep this notice and cite the repository (see NOTICE).
 """Stripmap granule metadata, from the ASF search API or a saved catalog.
 
 Everything `sm_db` needs about an acquisition is available from ASF's search

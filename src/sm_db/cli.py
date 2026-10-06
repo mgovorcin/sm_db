@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 California Institute of Technology ("Caltech")
+# SPDX-License-Identifier: Apache-2.0
+# Part of sm_db, https://github.com/mgovorcin/sm_db. If you copy or adapt
+# any of this code, keep this notice and cite the repository (see NOTICE).
 """Command line interface: ``sm-db``."""
 
 from __future__ import annotations
